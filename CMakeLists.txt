@@ -36,6 +36,7 @@ set(KERNEL_SRC
     src/kernel/save.c
     src/model/feature.c
     src/app/history.c
+    src/app/modeling.c
 )
 
 set(WARN -Wall -Wextra -Wconversion -Wpedantic)

@@ -38,6 +38,16 @@ typedef struct UiState {
     int32_t   active_value;      /* value d-pad edits             */
     int32_t   value_step;
     int8_t    want_undo, want_redo;
+    /* Interactive-modeling intents (consumed in main.c, driven by input.c).
+     * want_new_boss/cut: start an extrude on the selected face (Triangle/Square).
+     * want_confirm/cancel: finalise/abort the pending edit (Cross/Circle while
+     * pending). want_dist_delta: live distance nudge from d-pad Up/Down. */
+    int8_t    want_new_boss, want_new_cut;
+    int8_t    want_confirm,  want_cancel;
+    int32_t   want_dist_delta;
+    int8_t    modeling_pending;  /* main.c writes 1 while an edit is in progress;
+                                  * input.c reads it to route Cross/Circle to
+                                  * confirm/cancel instead of select/deselect. */
     int8_t    want_zoom_fit;     /* L3 pressed                    */
     int8_t    want_view;         /* StdView+1 chosen, 0 = none    */
     int8_t    want_recenter;     /* R3 pressed -> recenter pivot   */

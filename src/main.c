@@ -6,6 +6,8 @@
  */
 #include "minicad/feature.h"
 #include "minicad/save.h"
+#include "minicad/history.h"
+#include "minicad/modeling.h"
 
 #ifdef MINICAD_PSX
 /* Backing memory for the B-rep pools (the Model DB arena, statically sized).
@@ -21,6 +23,8 @@ static Solid    s_solids[64];
 
 static Brep     g_brep;
 static Document g_doc;
+static History  g_hist;          /* centralised undo/redo (20KB) — keep static */
+static ModelingState g_model;    /* in-progress interactive edit              */
 
 /* Build the demo part purely from the feature recipe. */
 static void build_demo(Document *d) {
@@ -69,7 +73,7 @@ extern void render_panel(Document *doc, UiState *ui);
 extern void render_end(void);
 extern void input_init(void);
 extern void input_poll(UiState **out);
-extern void input_apply(UiState *ui, Camera *cam, Document *doc);
+extern void input_apply(UiState *ui, Camera *cam, Document *doc, History *hist);
 extern int  input_moving(const UiState *ui);
 extern uint16_t input_selected(const UiState *ui);
 
@@ -79,6 +83,11 @@ int main(void) {
               s_faces,1024, s_shells,64,   s_solids,64);
     build_demo(&g_doc);
     doc_regen(&g_doc, &g_brep);
+
+    /* Centralised history (init once on the clean baseline) + the interactive
+     * modeling state. main.c drives the modeling core off the UI intents. */
+    hist_init(&g_hist, &g_doc);
+    model_init(&g_model);
 
     render_init();
     input_init();
@@ -90,7 +99,38 @@ int main(void) {
     for (;;) {
         UiState *ui;
         input_poll(&ui);
-        input_apply(ui, &cam, &g_doc);     /* camera moves, edits -> regen flag */
+
+        /* Tell input.c whether an edit is in progress so it routes Cross/Circle
+         * to confirm/cancel instead of select/deselect this frame. */
+        ui->modeling_pending = (int8_t)g_model.pending;
+
+        input_apply(ui, &cam, &g_doc, &g_hist);  /* camera + undo/redo */
+
+        /* --- Interactive modeling: drive the modeling core off UI intents --- */
+        if (g_model.pending) {
+            if (ui->want_dist_delta)
+                model_nudge_distance(&g_model, &g_doc, &g_brep, ui->want_dist_delta);
+            if (ui->want_confirm)
+                model_confirm(&g_model, &g_doc, &g_brep, &g_hist);
+            else if (ui->want_cancel)
+                model_cancel(&g_model, &g_doc, &g_brep);
+        } else {
+            if (ui->want_new_boss && ui->sel_kind == KIND_FACE)
+                model_begin_extrude(&g_model, &g_doc, &g_brep,
+                                    (FaceId)ui->sel_id, OP_BOSS);
+            else if (ui->want_new_cut && ui->sel_kind == KIND_FACE)
+                model_begin_extrude(&g_model, &g_doc, &g_brep,
+                                    (FaceId)ui->sel_id, OP_CUT);
+        }
+
+        /* After an undo/redo the document is a different snapshot: rebuild the
+         * B-rep so the view reflects it. (A no-op cost on idle frames is fine.) */
+        if (ui->want_undo || ui->want_redo) {
+            model_regen_all(&g_doc, &g_brep);
+            /* a pending edit can't survive a history jump */
+            g_model.pending = 0;
+        }
+
         cam_update(&cam);
 
         render_begin();

@@ -5,6 +5,7 @@
 #include "minicad/feature.h"
 #include "minicad/sketch.h"
 #include "minicad/history.h"
+#include "minicad/modeling.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -356,6 +357,96 @@ static void test_through_all_fuses_one_solid(void) {
     CHECK(brep_check_euler(&brep, 0), "fuse: V-E+F is genus-1 (==0)");
 }
 
+/* ---- interactive modeling core --------------------------------------------
+ * Starting from the demo part, model_begin_extrude on a side wall + confirm
+ * grows feat_count by 2 (sketch+extrude), the B-rep face/solid count grows,
+ * cancel restores the prior counts, and an undo after confirm reverts while a
+ * redo restores. */
+static Document g_mdoc;
+static History  g_mhist;   /* large; keep off the stack */
+/* pick a side-wall face of the demo (normal along +x: not a pierced cap). */
+static FaceId find_side_face(Brep *b) {
+    for (uint16_t fi = 0; fi < b->faces.count; fi++) {
+        Face *f = brep_face(b, fi);
+        if (f->normal.x != 0 && f->normal.y == 0 && f->normal.z == 0)
+            return fi;
+    }
+    return BREP_NONE;
+}
+static void test_modeling_core(void) {
+    DECLARE_BREP(brep);
+    build_demo_doc(&g_mdoc);
+    int ok = model_regen_all(&g_mdoc, &brep);
+    CHECK(ok == 1, "model: demo regen via model_regen_all");
+
+    uint16_t feat0   = g_mdoc.feat_count;
+    uint16_t faces0  = brep.faces.count;
+    uint16_t solids0 = brep.solids.count;
+
+    /* history is initialised on the CLEAN baseline (mirrors main.c at boot). */
+    History *hh = &g_mhist;
+    hist_init(hh, &g_mdoc);
+
+    FaceId side = find_side_face(&brep);
+    CHECK(side != BREP_NONE, "model: found a side-wall face to build on");
+
+    /* plane_from_face: axes are ~unit (1.12) and orthogonal to the normal. */
+    SketchPlane pl = plane_from_face(&brep, side);
+    mym2_t un = (mym2_t)pl.u_axis.x*pl.u_axis.x + (mym2_t)pl.u_axis.y*pl.u_axis.y
+              + (mym2_t)pl.u_axis.z*pl.u_axis.z;
+    CHECK(un > (mym2_t)(FX_ONE-200)*(FX_ONE-200)
+            && un < (mym2_t)(FX_ONE+200)*(FX_ONE+200),
+          "model: plane u_axis is ~unit length (1.12)");
+    CHECK(v3_dot(pl.u_axis, pl.normal) == 0 || (v3_dot(pl.u_axis, pl.normal) < 64
+            && v3_dot(pl.u_axis, pl.normal) > -64),
+          "model: u_axis orthogonal to normal");
+
+    ModelingState m; model_init(&m);
+    ok = model_begin_extrude(&m, &g_mdoc, &brep, side, OP_BOSS);
+    CHECK(ok == 1, "model: begin boss-extrude regenerated a preview");
+    CHECK(m.pending == 1, "model: edit is pending");
+    CHECK(g_mdoc.feat_count == feat0 + 2, "model: pending adds 2 features (sketch+extrude)");
+    uint16_t faces_prev = brep.faces.count;
+    CHECK(brep.faces.count > faces0, "model: preview grew the B-rep face count");
+    CHECK(brep.solids.count > solids0, "model: preview added a solid (the boss)");
+
+    /* live distance change re-regens cleanly (counts stable for a cylinder) */
+    ok = model_set_distance(&m, &g_mdoc, &brep, 400);
+    CHECK(ok == 1, "model: set_distance regenerated");
+    CHECK(m.dist == 400, "model: distance updated to 400");
+    CHECK(brep.faces.count == faces_prev, "model: face count stable across distance change");
+
+    /* confirm: snapshot to history, clear pending */
+    ok = model_confirm(&m, &g_mdoc, &brep, hh);
+    CHECK(ok == 1, "model: confirm succeeded");
+    CHECK(m.pending == 0, "model: no longer pending after confirm");
+    CHECK(g_mdoc.feat_count == feat0 + 2, "model: confirmed features remain");
+
+    /* undo removes the feature (counts revert), redo restores it */
+    int moved = hist_undo(hh, &g_mdoc);
+    CHECK(moved == 1, "model: undo moved");
+    CHECK(g_mdoc.feat_count == feat0, "model: undo reverts feat_count");
+    model_regen_all(&g_mdoc, &brep);
+    CHECK(brep.faces.count == faces0, "model: undo reverts B-rep faces");
+
+    moved = hist_redo(hh, &g_mdoc);
+    CHECK(moved == 1, "model: redo moved");
+    CHECK(g_mdoc.feat_count == feat0 + 2, "model: redo restores feat_count");
+    model_regen_all(&g_mdoc, &brep);
+    CHECK(brep.faces.count > faces0, "model: redo restores the boss faces");
+
+    /* cancel path: begin then cancel restores prior counts */
+    ModelingState m2; model_init(&m2);
+    uint16_t featc = g_mdoc.feat_count, facesc = brep.faces.count;
+    ok = model_begin_extrude(&m2, &g_mdoc, &brep, side, OP_BOSS);
+    CHECK(ok == 1, "model: second begin for cancel test");
+    CHECK(g_mdoc.feat_count == featc + 2, "model: cancel-test pending added 2");
+    model_cancel(&m2, &g_mdoc, &brep);
+    CHECK(m2.pending == 0, "model: cancel cleared pending");
+    CHECK(g_mdoc.feat_count == featc, "model: cancel restored feat_count");
+    CHECK(brep.faces.count == facesc, "model: cancel restored B-rep faces");
+}
+
 static void test_sketch_points_shared(void) {
     Sketch2 s; sk_init(&s);
     /* a rectangle should create 4 shared points + 4 lines */
@@ -618,6 +709,7 @@ int main(void) {
     test_revolve();
     test_winding_consistency();
     test_through_all_fuses_one_solid();
+    test_modeling_core();
     test_sketch_points_shared();
     test_sketch_construction();
     test_sketch_trim();
