@@ -203,6 +203,8 @@ static void pick(UiState *ui) {
     int cx = ui->cursor_x, cy = ui->cursor_y;
     ui->hover_kind = KIND_NONE;
     ui->hover_id   = 0;
+    ui->hover_feat = 0;          /* clear stale tree-hover when nothing is under
+                                  * the cursor (keeps the FM panel band in sync) */
 
     if (ui->filter == FILT_FACE) {
         long bestz = 0x7fffffff; int found = 0;
@@ -510,6 +512,146 @@ void render_model(Brep *b, UiState *ui, int moving) {
             emit_annulus(b, &g_fp[i], moving, ui);
     }
     draw_cursor(ui);
+}
+
+/* ---- FeatureManager design-tree panel (SolidWorks-style, left dock) --------
+ * Renders a docked panel down the LEFT 120px of the framebuffer per the layout
+ * spec in docs/SOLIDWORKS_FM.md: a light TILE background, a 1px divider, the
+ * document title in a title bar, then one row per feature in feat[] order.
+ *
+ * Each row = [icon char][space][name], indented by the feature's dependency
+ * depth. Depth is computed transitively: depth = 1 + max(depth of parents),
+ * roots (sketches / datums with no deps) at depth 0. The selected feature
+ * (ui->selected_feat) gets a strong blue band; the hovered one (ui->hover_feat)
+ * a lighter band; suppressed features are drawn over a dim band so they read as
+ * grayed out (the SDK font glyphs are a fixed texture and cannot be recolored,
+ * so state is conveyed by the row band behind the text — matching the spec's
+ * "selection is a filled rectangle drawn before the text" approach).
+ *
+ * Drawn into the FRONT OT buckets so it overlays the 3D model:
+ *   bucket 2: panel chrome (bg, divider, row bands)
+ *   bucket 1: text sprites (in front of the bands)
+ *   bucket 0: cursor (already drawn there by draw_cursor) stays on top.
+ */
+#define FM_X        0
+#define FM_W        120
+#define FM_DIV_X    119
+#define FM_TITLE_H  10
+#define FM_ROW_Y0   12
+#define FM_PITCH    10
+#define FM_INDENT   6
+#define FM_TXT_X0   2
+#define FM_COLS     15            /* 120px / 8px glyph                       */
+/* The whole panel lives in ONE OT bucket that is GUARANTEED to sort in front
+ * of the 3D model. The model's quads/edges land in low buckets (otz>>2, plus a
+ * per-feature ±1 nudge, with edges one bucket nearer), so buckets 0/1 can be
+ * overdrawn by model geometry; bucket 2 has proven reliably frontmost on the
+ * left dock. Within the bucket, addPrim PREPENDS, so the draw order is the
+ * REVERSE of the add order: we add text first (drawn last = on top), then the
+ * row bands, then the opaque chrome last (drawn first = at the back). */
+#define FM_BKT  2
+
+/* pick the ASCII icon char for a feature kind (§2.4 of the spec) */
+static char fm_icon(const Feature *f) {
+    switch (f->kind) {
+        case FEAT_SKETCH:    return '#';
+        case FEAT_EXTRUDE:   return (f->p.extrude.op == OP_CUT) ? 'o' : 'O';
+        case FEAT_REVOLVE:   return (f->p.revolve.op == OP_CUT) ? 'q' : 'Q';
+        case FEAT_REF_PLANE: return ':';
+        case FEAT_REF_AXIS:  return '/';
+        case FEAT_REF_POINT: return '*';
+        default:             return '?';
+    }
+}
+
+/* transitive dependency depth of feat[i], computed from feat[] in order.
+ * depth[i] = 1 + max(depth of each parent referenced in depends_on[]). Roots
+ * (no deps) are depth 0. Features are stored in dependency order so parents
+ * always precede children; a single forward pass suffices. */
+static int fm_depth(const Document *doc, const int *depth, int i) {
+    const Feature *f = &doc->feat[i];
+    int d = 0;
+    for (int k = 0; k < f->dep_count; ++k) {
+        uint16_t pid = f->depends_on[k];
+        for (int j = 0; j < i; ++j) {
+            if (doc->feat[j].id == pid) {
+                if (depth[j] + 1 > d) d = depth[j] + 1;
+                break;
+            }
+        }
+    }
+    return d;
+}
+
+/* one filled TILE row band at (x,row_y) of the panel, RGB given */
+static TILE *fm_band(TILE *t, int row_y, int r, int g, int b) {
+    setTile(t); setWH(t, FM_W, FM_PITCH);
+    setXY0(t, FM_X, row_y);
+    setRGB0(t, r, g, b);
+    return t;
+}
+
+void render_panel(Document *doc, UiState *ui) {
+    int a = g_rc.active;
+    uint32_t *ot = g_rc.ot[a];
+
+    /* per-feature depth (single forward pass; parents precede children) */
+    int depth[DOC_MAX_FEATURES];
+    int n = doc->feat_count;
+    if (n > DOC_MAX_FEATURES) n = DOC_MAX_FEATURES;
+    for (int i = 0; i < n; ++i) depth[i] = fm_depth(doc, depth, i);
+
+    int max_rows = (SCREEN_H - FM_ROW_Y0) / FM_PITCH;
+
+    /* === Pass 1: TEXT (added FIRST so it draws LAST = on top) =============== */
+    void *pri = g_rc.nextpri;
+    pri = FntSort(&ot[FM_BKT], pri, FM_X + 2, 1, doc->title);
+
+    for (int i = 0; i < n && i < max_rows; ++i) {
+        const Feature *f = &doc->feat[i];
+        int row_y  = FM_ROW_Y0 + i * FM_PITCH;
+        int indent = depth[i] * FM_INDENT;
+
+        /* build "<icon> <name>" hard-clipped to the panel's char budget */
+        char line[FM_COLS + 1];
+        int budget = FM_COLS - (indent / 8);   /* chars that fit past indent  */
+        if (budget < 1) budget = 1;
+        int p = 0;
+        if (p < budget && p < FM_COLS) line[p++] = fm_icon(f);
+        if (p < budget && p < FM_COLS) line[p++] = ' ';
+        for (int c = 0; f->name[c] && p < budget && p < FM_COLS; ++c)
+            line[p++] = f->name[c];
+        line[p] = 0;
+
+        pri = FntSort(&ot[FM_BKT], pri, FM_TXT_X0 + indent, row_y, line);
+    }
+
+    /* === Pass 2: ROW BANDS (added after text -> drawn behind it) =========== */
+    TILE *t = (TILE *)pri;
+    for (int i = 0; i < n && i < max_rows; ++i) {
+        const Feature *f = &doc->feat[i];
+        int row_y = FM_ROW_Y0 + i * FM_PITCH;
+        int sel   = (f->id == ui->selected_feat);
+        int hov   = (f->id == ui->hover_feat);
+        if (f->suppressed)  { t = fm_band(t, row_y,  64,  64,  64); addPrim(ot[FM_BKT], t); t++; }
+        if (sel)            { t = fm_band(t, row_y,  40,  90, 220); addPrim(ot[FM_BKT], t); t++; }
+        else if (hov)       { t = fm_band(t, row_y,  70,  90, 130); addPrim(ot[FM_BKT], t); t++; }
+    }
+
+    /* === Pass 3: CHROME (added last -> drawn first = at the very back) ===== */
+    setTile(t); setWH(t, 1, SCREEN_H); setXY0(t, FM_DIV_X, 0);
+    setRGB0(t, 100, 100, 100);                 /* 1px divider vs viewport     */
+    addPrim(ot[FM_BKT], t); t++;
+
+    setTile(t); setWH(t, FM_W, FM_TITLE_H); setXY0(t, FM_X, 0);
+    setRGB0(t, 30, 60, 110);                    /* title bar (steel-blue)      */
+    addPrim(ot[FM_BKT], t); t++;
+
+    setTile(t); setWH(t, FM_W, SCREEN_H); setXY0(t, FM_X, 0);
+    setRGB0(t, 48, 52, 60);                     /* dark panel bg (font is white */
+    addPrim(ot[FM_BKT], t); t++;               /* -> need a dark backdrop)     */
+
+    g_rc.nextpri = (uint8_t *)t;
 }
 
 /* Present the just-built frame, overlapping with the next build (§6.2):

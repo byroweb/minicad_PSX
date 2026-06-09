@@ -65,6 +65,7 @@ extern void render_init(void);
 extern void render_begin(void);
 extern void render_set_camera(const Camera *c);
 extern void render_model(Brep *b, UiState *ui, int moving);
+extern void render_panel(Document *doc, UiState *ui);
 extern void render_end(void);
 extern void input_init(void);
 extern void input_poll(UiState **out);
@@ -95,6 +96,7 @@ int main(void) {
         render_begin();
         render_set_camera(&cam);
         render_model(&g_brep, ui, input_moving(ui));
+        render_panel(&g_doc, ui);
         render_end();
     }
     return 0;
