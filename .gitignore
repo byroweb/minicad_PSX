@@ -1,0 +1,8 @@
+build/
+build-psx/
+*.o
+*.elf
+*.exe
+*.mcad
+build_err.txt
+__pycache__/
