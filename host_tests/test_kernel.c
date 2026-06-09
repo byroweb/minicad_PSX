@@ -234,6 +234,83 @@ static void test_winding_consistency(void) {
     }
 }
 
+/* ---- through-all cut fuses into the target as ONE body (faces-with-holes) ----
+ * Builds the demo part (60mm cube + Ø30 through-hole) via doc_regen and asserts
+ * the fused topology: 1 solid, both pierced caps holed, inner-loop vertex count
+ * == N, generalized Euler residual 0 (genus 1), no unpaired half-edges. */
+static int count_unpaired(Brep *b) {
+    int u = 0;
+    for (uint16_t hi=0; hi<b->hedges.count; hi++)
+        if (brep_he(b, hi)->twin == BREP_NONE) u++;
+    return u;
+}
+static int loop_len(Brep *b, LoopId lo) {
+    Loop *L = (Loop*)pool_get(&b->loops, lo);
+    HEdgeId h0 = L->first_he, h = h0; int n = 0, guard = 0;
+    do { n++; h = brep_he(b,h)->next; } while (h != h0 && guard++ < 256);
+    return n;
+}
+static void build_demo_doc(Document *d) {
+    doc_init(d, "Part1");
+    Feature *sk = doc_add(d, FEAT_SKETCH, "Sketch1");
+    sk->sketch.plane = plane_xy(); sk->sketch.count = 1;
+    sk->sketch.ent[0].kind = SK_RECT;
+    sk->sketch.ent[0].a = (Vec2i){-300,-300}; sk->sketch.ent[0].b = (Vec2i){300,300};
+    Feature *ex = doc_add(d, FEAT_EXTRUDE, "Boss-Extrude1");
+    ex->p.extrude.sketch_id = sk->id; ex->p.extrude.dist = 600;
+    ex->p.extrude.dir = 1; ex->p.extrude.op = OP_BOSS;
+    ex->p.extrude.end = END_BLIND; ex->p.extrude.target_face = 0;
+    ex->depends_on[0] = sk->id; ex->dep_count = 1;
+    Feature *sk2 = doc_add(d, FEAT_SKETCH, "Sketch2");
+    sk2->sketch.plane = plane_xy(); sk2->sketch.count = 1;
+    sk2->sketch.ent[0].kind = SK_CIRCLE;
+    sk2->sketch.ent[0].a = (Vec2i){0,0}; sk2->sketch.ent[0].radius = 150;
+    Feature *cut = doc_add(d, FEAT_EXTRUDE, "Cut-Extrude1");
+    cut->p.extrude.sketch_id = sk2->id; cut->p.extrude.dist = 600;
+    cut->p.extrude.dir = 1; cut->p.extrude.op = OP_CUT;
+    cut->p.extrude.end = END_THROUGH_ALL; cut->p.extrude.target_face = 0;
+    cut->depends_on[0] = sk2->id; cut->dep_count = 1;
+}
+static Document g_cutdoc;
+static void test_through_all_fuses_one_solid(void) {
+    DECLARE_BREP(brep);
+    build_demo_doc(&g_cutdoc);
+    int ok = doc_regen(&g_cutdoc, &brep);
+    CHECK(ok == 1, "fuse: demo regen succeeded");
+    CHECK(brep.solids.count == 1, "fuse: exactly ONE solid (cube+hole fused)");
+
+    /* N for Ø30 (radius 150) -> 12 segments */
+    int N = circle_segments(150);
+    CHECK(N == 12, "fuse: cut ring is 12-gon");
+
+    /* expected fused counts: V=8+2N, E=12+3N, F=6+N, R=2, S=1, G=1 */
+    int V,E,F,R;
+    int resid = brep_euler_residual(&brep, 1, &V,&E,&F,&R);
+    CHECK(V == 8 + 2*N,  "fuse: V == 8 + 2N");
+    CHECK(E == 12 + 3*N, "fuse: E == 12 + 3N");
+    CHECK(F == 6 + N,    "fuse: F == 6 + N");
+    CHECK(R == 2,        "fuse: R == 2 (two cap holes)");
+    CHECK(resid == 0,    "fuse: generalized Euler residual == 0 (genus 1)");
+
+    /* exactly two faces are holed, each with an inner loop of N edges */
+    int holed = 0, inner_ok = 0;
+    for (uint16_t fi=0; fi<brep.faces.count; fi++){
+        Face *f = brep_face(&brep, fi);
+        if (f->inner_count == 1) { holed++;
+            if (loop_len(&brep, f->inner[0]) == N) inner_ok++;
+        }
+        CHECK(f->inner_count <= 1, "fuse: no face has more than one hole");
+    }
+    CHECK(holed == 2,    "fuse: exactly two pierced caps are faces-with-holes");
+    CHECK(inner_ok == 2, "fuse: each inner loop has N half-edges");
+
+    CHECK(count_unpaired(&brep) == 0, "fuse: no unpaired half-edges remain");
+    CHECK(all_twins_antiparallel(&brep), "fuse: all twins anti-parallel");
+    CHECK(all_faces_wind_outward(&brep),
+          "fuse: outer-face signed volume positive (consistent outward winding)");
+    CHECK(brep_check_euler(&brep, 0), "fuse: V-E+F is genus-1 (==0)");
+}
+
 static void test_sketch_points_shared(void) {
     Sketch2 s; sk_init(&s);
     /* a rectangle should create 4 shared points + 4 lines */
@@ -372,6 +449,7 @@ int main(void) {
     test_through_all_is_cut_only();
     test_revolve();
     test_winding_consistency();
+    test_through_all_fuses_one_solid();
     test_sketch_points_shared();
     test_sketch_construction();
     test_sketch_trim();

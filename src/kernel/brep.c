@@ -126,6 +126,29 @@ static HEdgeId build_loop(Brep *b, const VertId *ring, int n, LoopId loop) {
     return first;
 }
 
+LoopId brep_add_face_hole(Brep *b, FaceId fid, const VertId *ring, int n) {
+    if (n < 3) return BREP_NONE;
+    Face *f = brep_face(b, fid);
+    if (!f || f->inner_count >= 4) return BREP_NONE;
+    LoopId li = pool_alloc(&b->loops);
+    if (li == BREP_NONE) return BREP_NONE;
+    Loop *IL = (Loop *)pool_get(&b->loops, li);
+    IL->face = fid;
+    IL->first_he = build_loop(b, ring, n, li);
+    if (IL->first_he == BREP_NONE) return BREP_NONE;
+    f->inner[f->inner_count++] = li;
+    return li;
+}
+
+int brep_shell_add_face(Brep *b, ShellId shid, FaceId fid) {
+    Shell *sh = (Shell *)pool_get(&b->shells, shid);
+    if (!sh || sh->face_count >= 64) return 0;
+    sh->faces[sh->face_count++] = fid;
+    Face *f = brep_face(b, fid);
+    if (f) f->shell = shid;
+    return 1;
+}
+
 void brep_face_plane(Brep *b, FaceId fid) {
     Face *f = brep_face(b, fid);
     Loop *lp = (Loop *)pool_get(&b->loops, f->outer);
@@ -178,4 +201,26 @@ int brep_check_euler(const Brep *b, SolidId solid) {
      * We accept either here and let the caller assert the expected genus. */
     int chi = V - E + F;
     return (chi == 2 || chi == 0);
+}
+
+int brep_euler_residual(const Brep *b, int genus,
+                        int *Vout, int *Eout, int *Fout, int *Rout) {
+    int V = b->verts.count;
+    int E = b->edges.count;
+    int F = b->faces.count;
+    int S = b->solids.count;
+    /* R = total inner (hole) rings over all faces. The MVP never frees faces,
+     * so a linear walk of the pool matches the live set (same assumption the
+     * test helpers make). */
+    int R = 0;
+    for (uint16_t fi = 0; fi < b->faces.count; ++fi) {
+        const Face *f = (const Face *)pool_get((Pool *)&b->faces, fi);
+        if (f) R += f->inner_count;
+    }
+    if (Vout) *Vout = V;
+    if (Eout) *Eout = E;
+    if (Fout) *Fout = F;
+    if (Rout) *Rout = R;
+    /* V - E + F - R = 2(S - G)  =>  residual = V - E + F - R - 2(S - G). */
+    return V - E + F - R - 2 * (S - genus);
 }

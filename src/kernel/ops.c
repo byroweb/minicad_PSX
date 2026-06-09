@@ -178,6 +178,132 @@ static SolidId build_prism(Brep *b, const Vec3i *base_pts, int n, Vec3i vec,
     return sid;
 }
 
+/* ---------------- through-cut fusion ----------------
+ * Fuse a through-all cut INTO the target solid as a single body with
+ * faces-with-holes, instead of emitting a separate open tube.
+ *
+ * Inputs: the profile ring (N points on the sketch plane) and the cut direction
+ * `cdir` (1.12 unit, already sign-applied). Steps:
+ *   1. pick the target solid (the last solid built) and its shell;
+ *   2. find the two cap faces it pierces (normal parallel to the cut axis):
+ *      the ENTRY cap (closest plane along -cdir from the profile) and the EXIT
+ *      cap (closest along +cdir);
+ *   3. project the profile ring onto each cap plane -> entry_ring / exit_ring,
+ *      with EXACTLY the cap-plane coordinates so the tube ends are coincident;
+ *   4. under ONE brep_begin_solid scope: add the projected ring as an inner
+ *      (hole) loop on each cap, then build the N tube side-quads. Twin pairing is
+ *      scoped across all of it, so the cap inner-loop half-edges pair with the
+ *      tube end edges (no boundary edges remain);
+ *   5. adopt the tube faces into the target shell. No new solid is allocated.
+ *
+ * Returns the target solid id, or BREP_NONE if the supported configuration
+ * (two parallel cap faces straddling the profile) is not found.
+ */
+
+/* Project point P along unit direction u (1.12) onto plane (fn . X = pd).
+ * Exact-ish integer: t = (pd - fn.P)*FX_ONE / (fn.u); result = P + t*u/FX_ONE. */
+static Vec3i project_to_plane(Vec3i p, Vec3i u, Vec3i fn, mym2_t pd) {
+    mym2_t denom = v3_dot(fn, u);                 /* scaled by FX_ONE (u is 1.12) */
+    if (denom == 0) return p;                     /* parallel: shouldn't happen   */
+    mym2_t t = mym_div_round((pd - v3_dot(fn, p)) << FX_SHIFT, denom); /* myriom. */
+    Vec3i r;
+    r.x = p.x + (mym_t)mym_div_round((mym2_t)u.x * t, FX_ONE);
+    r.y = p.y + (mym_t)mym_div_round((mym2_t)u.y * t, FX_ONE);
+    r.z = p.z + (mym_t)mym_div_round((mym2_t)u.z * t, FX_ONE);
+    return r;
+}
+
+static SolidId cut_through_fuse(Brep *b, const Vec3i *ring, int n, Vec3i cdir,
+                                uint16_t feat) {
+    if (n < 3 || n > 64) return BREP_NONE;
+    if (b->solids.count == 0) return BREP_NONE;
+
+    /* target = last solid built (the body we cut into) */
+    SolidId tsid = (SolidId)(b->solids.count - 1);
+    Solid *ts = (Solid *)pool_get(&b->solids, tsid);
+    if (!ts) return BREP_NONE;
+    ShellId tshid = ts->outer;
+    Shell *tsh = (Shell *)pool_get(&b->shells, tshid);
+    if (!tsh) return BREP_NONE;
+
+    /* Reference point: profile centroid (integer mean) to score cap distance. */
+    mym2_t cx = 0, cy = 0, cz = 0;
+    for (int i = 0; i < n; ++i) { cx += ring[i].x; cy += ring[i].y; cz += ring[i].z; }
+    Vec3i ctr = { (mym_t)(cx / n), (mym_t)(cy / n), (mym_t)(cz / n) };
+
+    /* Find the two cap faces: normal parallel to the cut axis, straddling the
+     * profile along cdir. ENTRY = the cap on the -cdir side (smallest signed
+     * distance), EXIT = the cap on the +cdir side (largest). */
+    FaceId entry = BREP_NONE, exitf = BREP_NONE;
+    mym2_t entry_s = 0, exit_s = 0;
+    for (uint8_t k = 0; k < tsh->face_count; ++k) {
+        FaceId fid = tsh->faces[k];
+        Face *f = brep_face(b, fid);
+        if (!f) continue;
+        if (v3_cross(f->normal, cdir).x != 0 ||
+            v3_cross(f->normal, cdir).y != 0 ||
+            v3_cross(f->normal, cdir).z != 0) continue;   /* not a cap (not parallel) */
+        if (f->inner_count != 0) continue;                /* already holed */
+        /* signed distance of the cap plane from the profile centroid along cdir:
+         * solve fn.(ctr + s*cdir) = pd  ->  s = (pd - fn.ctr)/(fn.cdir). */
+        mym2_t denom = v3_dot(f->normal, cdir);
+        if (denom == 0) continue;
+        mym2_t s = mym_div_round((f->plane_d - v3_dot(f->normal, ctr)) << FX_SHIFT, denom);
+        if (entry == BREP_NONE || s < entry_s) { entry = fid; entry_s = s; }
+        if (exitf == BREP_NONE || s > exit_s)  { exitf = fid; exit_s = s; }
+    }
+    if (entry == BREP_NONE || exitf == BREP_NONE || entry == exitf) return BREP_NONE;
+
+    Face *fe = brep_face(b, entry), *fx = brep_face(b, exitf);
+
+    /* Project the profile ring onto each cap plane -> coincident tube end rings.
+     * The tube wall vertices ARE these projected points (shared with the cap
+     * inner loops), which is what lets the twins pair. */
+    Vec3i ep[64], xp[64];
+    for (int i = 0; i < n; ++i) {
+        ep[i] = project_to_plane(ring[i], cdir, fe->normal, fe->plane_d);
+        xp[i] = project_to_plane(ring[i], cdir, fx->normal, fx->plane_d);
+    }
+    VertId ev[64], xv[64];
+    for (int i = 0; i < n; ++i) {
+        ev[i] = brep_add_vertex(b, ep[i]);
+        xv[i] = brep_add_vertex(b, xp[i]);
+    }
+
+    /* ---- one twin scope for the inner loops + the whole tube wall ---- */
+    brep_begin_solid(b);
+
+    /* INNER HOLE LOOP WINDING (load-bearing — see report to render agent):
+     * The cap OUTER loop is CCW-from-outside. A hole loop must be wound the
+     * OPPOSITE sense (CW-from-outside, i.e. reversed) so it bounds the same face
+     * area with a consistent orientation and so its half-edges run anti-parallel
+     * to the tube wall edges they twin with. We feed each cap the projected ring
+     * REVERSED. The entry cap faces -cdir and the exit cap faces +cdir, so the
+     * "reverse for a hole" direction is opposite on the two caps. The tube quad
+     * {ev[i],xv[i],xv[j],ev[j]} traverses the entry ring as j->i and the exit
+     * ring as i->j; for anti-parallel twins the entry inner loop must run i->j
+     * (ev forward) and the exit inner loop j->i (xv reversed). This also yields
+     * a CW-from-outside hole on each cap (verified by the antiparallel-twin +
+     * outward-volume tests). */
+    VertId ev_fwd[64], xv_rev[64];
+    for (int i = 0; i < n; ++i) ev_fwd[i] = ev[i];
+    for (int i = 0; i < n; ++i) xv_rev[i] = xv[n - 1 - i];
+    if (brep_add_face_hole(b, entry, ev_fwd, n) == BREP_NONE) return BREP_NONE;
+    if (brep_add_face_hole(b, exitf, xv_rev, n) == BREP_NONE) return BREP_NONE;
+
+    /* Tube side quads spanning entry-ring -> exit-ring. The wall normals must
+     * point INTO the hole (away from the remaining material). Order chosen so
+     * each quad's edges twin anti-parallel with the cap inner-loop edges. */
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        VertId quad[4] = { ev[i], xv[i], xv[j], ev[j] };
+        FaceId fs = brep_build_face(b, quad, 4, 0, 0, 0, feat);
+        if (fs == BREP_NONE) return BREP_NONE;
+        if (!brep_shell_add_face(b, tshid, fs)) return BREP_NONE;
+    }
+    return tsid;
+}
+
 /* ---------------- extrude ---------------- */
 SolidId op_extrude(Brep *b, const Sketch *sk, const OpParams *params,
                    SolidId target_solid, uint16_t feature_id){
@@ -199,17 +325,24 @@ SolidId op_extrude(Brep *b, const Sketch *sk, const OpParams *params,
     }
 
     /* ---- CUT (pragmatic, profile-on-a-face) ----
-     * Model the cut as: the inner wall (a prism's side faces) + turn the target
-     * face into a face-with-hole using `ring` as an inner loop. For the MVP we
-     * build the inner wall as its own shell and tag the hole; full merge into
-     * the target solid's shell (so it reads as one solid) is the remaining
-     * step. This already yields correct geometry + tessellation for the cube
-     * bore and bearing ID.
+     * Fuse the through-cut INTO the target solid as ONE body: the two pierced
+     * cap faces become faces-with-holes and the N tube side-faces join the same
+     * shell, with twins paired so no boundary edges remain. (Was: a separate
+     * open-tube solid; that "one real limitation" is now closed for through-all.)
      *
-     * target_solid is where the hole's face-with-hole would be registered. */
-    (void)target_solid;
-    /* Open tube (no caps): the cut wall is the hole's inner surface; end caps
-     * would be degenerate zero-thickness faces coincident with the target. */
+     * cdir is the unit (1.12) cut direction. cut_through_fuse projects the
+     * profile onto each cap plane, so the over-cut `dist` only matters for the
+     * blind path; for through-all the tube ends land exactly on the caps. */
+    (void)target_solid; (void)vec;
+    if (params->end == END_THROUGH_ALL) {
+        Vec3i cdir = sk->plane.normal;
+        if (params->dir < 0) { cdir.x = -cdir.x; cdir.y = -cdir.y; cdir.z = -cdir.z; }
+        SolidId fused = cut_through_fuse(b, ring, n, cdir, feature_id);
+        if (fused != BREP_NONE) return fused;
+        /* fall through to the legacy open-tube only if fusion's supported
+         * configuration (two parallel straddling caps) was not found. */
+    }
+    /* Legacy / non-through cut: open tube (no caps) as its own wall solid. */
     SolidId wall = build_prism(b, ring, n, vec, 0 /*no caps*/, feature_id);
     return wall;
 }

@@ -93,12 +93,35 @@ FaceId brep_build_face(Brep *b, const VertId *ring, int n,
  * of a single solid so twin lookup is scoped to that solid. */
 void brep_begin_solid(Brep *b);
 
+/* Add an inner (hole) loop to an existing face, turning it into a face-with-hole.
+ * `ring` is the hole boundary as an ordered vertex ring of `n` verts; it should
+ * be wound OPPOSITE to the face's outer loop (CW as seen from outside the solid)
+ * so its half-edges pair anti-parallel with the hole-wall (tube) faces built in
+ * the SAME brep_begin_solid scope. Returns the new inner LoopId, or BREP_NONE on
+ * failure (face full at 4 holes, or pool exhaustion). The face plane is NOT
+ * recomputed (the outer loop already fixed it). */
+LoopId brep_add_face_hole(Brep *b, FaceId fid, const VertId *ring, int n);
+
+/* Append a face to a shell's face list. Returns 1 on success, 0 if the shell's
+ * fixed face array is full. Used by the cut-fusion path to adopt the tube wall
+ * faces into the target solid's existing shell. */
+int brep_shell_add_face(Brep *b, ShellId shid, FaceId fid);
+
 /* Compute the exact integer plane (normal + d) of a face from its loop. */
 void brep_face_plane(Brep *b, FaceId fid);
 
 /* Euler characteristic check for a closed 2-manifold solid: V - E + F = 2.
  * Returns 1 if satisfied. Used as a correctness assertion after every op. */
 int brep_check_euler(const Brep *b, SolidId solid);
+
+/* Generalized Euler-Poincare residual for the whole store (single-solid MVP):
+ *     residual = V - E + F - R - 2*(S - G)
+ * where R = total inner (hole) rings over all faces, S = shells, G = genus.
+ * A valid orientable manifold of the given genus has residual == 0. Returns the
+ * residual (0 = consistent). `genus` is the expected genus (cube+through-hole=1).
+ * If V/E/F/R out-params are non-NULL they receive the counts (handy for tests). */
+int brep_euler_residual(const Brep *b, int genus,
+                        int *V, int *E, int *F, int *R);
 
 /* Convenience accessors. */
 Vertex   *brep_vert (Brep *b, VertId id);
