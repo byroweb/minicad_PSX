@@ -27,6 +27,8 @@
 #include "minicad/history.h"
 
 #define DZ 24   /* analog dead-zone */
+#define SCREEN_W 320
+#define SCREEN_H 240
 
 static UiState  g_ui;
 static uint8_t  g_padbuf[2][34];
@@ -42,6 +44,10 @@ void input_init(void) {
     g_ui.filter = FILT_FACE;
     g_ui.value_step = 10;            /* 1.0 mm */
     g_ui.selected_feat = 0;
+    g_ui.cursor_x = SCREEN_W / 2;
+    g_ui.cursor_y = SCREEN_H / 2;
+    g_ui.hover_kind = KIND_NONE;
+    g_ui.sel_kind   = KIND_NONE;
 }
 
 static int axis(uint8_t raw) {
@@ -88,8 +94,12 @@ void input_poll(UiState **out) {
         g_ui.d_pitch = -(ry >> 3);
         g_ui.moving  = 1;
     }
-    /* cursor (L stick) */
+    /* cursor (L stick), clamped to the 320x240 viewport */
     if (lx || ly) { g_ui.cursor_x += (int16_t)(lx >> 5); g_ui.cursor_y += (int16_t)(ly >> 5); }
+    if (g_ui.cursor_x < 0) g_ui.cursor_x = 0;
+    if (g_ui.cursor_x > SCREEN_W - 1) g_ui.cursor_x = SCREEN_W - 1;
+    if (g_ui.cursor_y < 0) g_ui.cursor_y = 0;
+    if (g_ui.cursor_y > SCREEN_H - 1) g_ui.cursor_y = SCREEN_H - 1;
 
     /* filter scroll: L1 / R1 (unless used as pan modifier with L2/R2) */
     if (PRESS(PAD_R1) && !DOWN(PAD_R2)) g_ui.filter = (SelFilter)((g_ui.filter+1)%FILT_COUNT);
@@ -99,9 +109,21 @@ void input_poll(UiState **out) {
     if (DOWN(PAD_R2)) { if (DOWN(PAD_R1)) g_ui.d_pan_x += 4; else { g_ui.d_zoom += 6; g_ui.moving=1; } }
     if (DOWN(PAD_L2)) { if (DOWN(PAD_L1)) g_ui.d_pan_x -= 4; else { g_ui.d_zoom -= 6; g_ui.moving=1; } }
 
-    /* selection verbs */
-    if (PRESS(PAD_CROSS))   g_ui.selected_feat = g_ui.hover_feat;
-    if (PRESS(PAD_CIRCLE) && !sel_held) { /* deselect; hold handled in UI */ }
+    /* selection verbs. The picker (render.c) fills hover_id/hover_kind each
+     * frame from the cursor; Cross commits that to sel_id/sel_kind. We also
+     * keep selected_feat in sync (face-feature highlight) for compatibility. */
+    if (PRESS(PAD_CROSS)) {
+        if (g_ui.hover_kind != KIND_NONE) {
+            g_ui.sel_id   = g_ui.hover_id;
+            g_ui.sel_kind = g_ui.hover_kind;
+            g_ui.selected_feat = g_ui.hover_feat;
+        }
+    }
+    if (PRESS(PAD_CIRCLE) && !sel_held) {   /* deselect */
+        g_ui.sel_kind = KIND_NONE;
+        g_ui.sel_id   = 0;
+        g_ui.selected_feat = 0;
+    }
 
     /* undo/redo: Select + Triangle / Select + Circle */
     if (sel_held && PRESS(PAD_TRIANGLE)) g_ui.want_undo = 1;

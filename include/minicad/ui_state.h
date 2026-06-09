@@ -13,6 +13,11 @@ typedef enum {
     FILT_COUNT
 } SelFilter;
 
+/* What KIND of entity a picked id refers to. KIND_NONE = nothing picked. */
+typedef enum {
+    KIND_NONE = 0, KIND_VERTEX, KIND_EDGE, KIND_FACE
+} SelKind;
+
 typedef struct UiState {
     int16_t  cursor_x, cursor_y;
     int32_t  d_yaw, d_pitch;     /* orbit deltas this frame      */
@@ -22,6 +27,14 @@ typedef struct UiState {
     int       moving;            /* camera in motion -> wireframe */
     uint16_t  hover_feat;        /* feature under cursor          */
     uint16_t  selected_feat;     /* current selection             */
+    /* Generic cursor-picking state. The picker (render.c) writes hover_* each
+     * frame; input.c commits hover_* -> sel_* on Cross and clears on Circle.
+     * The id is a 16-bit PoolId whose meaning depends on the matching kind:
+     *   KIND_VERTEX -> VertId, KIND_EDGE -> HEdgeId, KIND_FACE -> FaceId. */
+    uint16_t  hover_id;          /* entity under cursor (by kind)  */
+    SelKind   hover_kind;
+    uint16_t  sel_id;            /* committed picked entity        */
+    SelKind   sel_kind;
     int32_t   active_value;      /* value d-pad edits             */
     int32_t   value_step;
     int8_t    want_undo, want_redo;

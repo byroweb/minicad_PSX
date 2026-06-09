@@ -68,7 +68,7 @@ static void build_demo(Document *d) {
 extern void render_init(void);
 extern void render_begin(void);
 extern void render_set_camera(const Camera *c);
-extern void render_model(Brep *b, uint16_t selected_feat, int moving);
+extern void render_model(Brep *b, UiState *ui, int moving);
 extern void render_end(void);
 extern void input_init(void);
 extern void input_poll(UiState **out);
@@ -98,7 +98,7 @@ int main(void) {
 
         render_begin();
         render_set_camera(&cam);
-        render_model(&g_brep, input_selected(ui), input_moving(ui));
+        render_model(&g_brep, ui, input_moving(ui));
         render_end();
     }
     return 0;
