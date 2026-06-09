@@ -142,8 +142,9 @@ Works on standard 128 KB `.mcr/.mcd/.bin` dumps from DuckStation/PCSX or a hardw
 - General line-chain profiles (`profile_to_ring` handles rect + circle; open line-chains next)
 - Reference-geometry datum computation (plane/axis/point from parents)
 - **Shell feature**: offset faces inward + remove selected faces — the half-edge adjacency fits it
-- Serialize feature *names* in the codec (geometry/params round-trip exactly today; names don't)
-- Multi-file card saves + a fuller on-screen save/load menu (single fixed slot today)
+- Multi-file card saves (single fixed slot today)
+- Force the DualShock into analog mode at boot (needs a config-mode SPI handshake;
+  today the pad boots digital and the D-pad orbits as a fallback until analog is toggled)
 
 ## Prior art to lean on (this is deliberately not novel)
 PSn00bSDK examples · nocash psxspx specs · Pikuma "How PS1 Graphics Work" · Psy-Q ordering-table

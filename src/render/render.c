@@ -628,7 +628,7 @@ static char *u2s(char *p, int v) {           /* 0..999 -> ascii; returns end */
     *p++ = (char)('0' + v % 10);
     return p;
 }
-static void render_bars(void) {
+static void render_bars(Document *doc, UiState *ui) {
     int a = g_rc.active;
     uint32_t *ot = g_rc.ot[a];
     long used = (long)(g_rc.nextpri - g_rc.pribuf[a]);
@@ -645,7 +645,23 @@ static void render_bars(void) {
     *p = 0;
     void *pri = g_rc.nextpri;
     pri = FntSort(&ot[FM_BKT], pri, 4, 9, buf);
-    pri = FntSort(&ot[FM_BKT], pri, 4, SCREEN_H - 16, "STATUS: READY");
+
+    /* bottom status: active selection filter + the selected feature's name */
+    static const char *const filt_name[FILT_COUNT] = {
+        "VERT", "EDGE", "FACE", "PROF", "DATUM", "LOOP"
+    };
+    char sbuf[48]; char *q = sbuf;
+    const char *fn = (ui->filter < FILT_COUNT) ? filt_name[ui->filter] : "?";
+    while (*fn) *q++ = *fn++;
+    *q++ = ' '; *q++ = ' ';
+    *q++ = 'S'; *q++ = 'E'; *q++ = 'L'; *q++ = ':'; *q++ = ' ';
+    Feature *sf = ui->selected_feat ? doc_find(doc, ui->selected_feat) : 0;
+    if (sf && sf->name[0]) {
+        const char *nm = sf->name;
+        while (*nm && q < sbuf + 46) *q++ = *nm++;
+    } else { *q++ = '-'; *q++ = '-'; }
+    *q = 0;
+    pri = FntSort(&ot[FM_BKT], pri, 4, SCREEN_H - 16, sbuf);
 
     /* gauge colour by load: green < 50, yellow < 80, red otherwise */
     int r, g, b;
@@ -671,7 +687,7 @@ void render_panel(Document *doc, UiState *ui) {
     int a = g_rc.active;
     uint32_t *ot = g_rc.ot[a];
 
-    render_bars();   /* top/bottom diagnostic bars, on top (added first) */
+    render_bars(doc, ui);   /* top/bottom diagnostic bars, on top (added first) */
 
     /* per-feature depth (single forward pass; parents precede children) */
     int depth[DOC_MAX_FEATURES];
