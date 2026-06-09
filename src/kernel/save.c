@@ -47,13 +47,14 @@ int mcad_encode(const Document *d, uint8_t *buf, int cap) {
          * largest (plane + up to 64 pts + 48 ents + 48 cons, each varint <=5B);
          * other kinds are tiny. Guard once up front so the writes below cannot
          * overrun the buffer. */
-        int need = 16;
+        int need = 16 + (FEAT_NAME_LEN + 1) + FEAT_MAX_DEPS * 5;
         if (f->kind == FEAT_SKETCH) {
             need = 4*3*5                       /* plane axes */
                  + 1 + f->sketch.pt_count  * 7
                  + 1 + f->sketch.ent_count * 12
                  + 1 + f->sketch.con_count * 10
-                 + 8;                          /* header/id slack */
+                 + 8                           /* header/id slack */
+                 + (FEAT_NAME_LEN + 1);        /* name */
         }
         if (o + need > cap - 12) return 0;          /* leave slack */
         payload[o++] = (uint8_t)f->kind;
@@ -61,6 +62,13 @@ int mcad_encode(const Document *d, uint8_t *buf, int cap) {
         o += vu_write(payload + o, f->id);
         for (uint8_t k = 0; k < f->dep_count; ++k)
             o += vu_write(payload + o, f->depends_on[k]);
+        /* feature name (length-prefixed, clamped to FEAT_NAME_LEN-1 chars) */
+        {
+            uint8_t nlen = 0;
+            while (nlen < FEAT_NAME_LEN - 1 && f->name[nlen]) nlen++;
+            payload[o++] = nlen;
+            for (uint8_t k = 0; k < nlen; ++k) payload[o++] = (uint8_t)f->name[k];
+        }
         switch (f->kind) {
         case FEAT_EXTRUDE:
             o += vu_write(payload + o, f->p.extrude.sketch_id);
@@ -165,6 +173,13 @@ int mcad_decode(Document *d, const uint8_t *buf, int len) {
         uint32_t tmp; o += vu_read(payload + o, &tmp); f->id = (uint16_t)tmp;
         for (uint8_t k = 0; k < f->dep_count; ++k) {
             o += vu_read(payload + o, &tmp); f->depends_on[k] = (uint16_t)tmp;
+        }
+        /* feature name (length-prefixed) */
+        {
+            uint8_t nlen = payload[o++];
+            if (nlen >= FEAT_NAME_LEN) nlen = FEAT_NAME_LEN - 1;
+            for (uint8_t k = 0; k < nlen; ++k) f->name[k] = (char)payload[o++];
+            f->name[nlen] = 0;
         }
         switch (kind) {
         case FEAT_EXTRUDE: {

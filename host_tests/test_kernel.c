@@ -47,7 +47,7 @@ static void test_save_roundtrip(void) {
     int n = mcad_encode(&a, buf, sizeof buf);
     CHECK(n > 0,            "encode produced bytes");
     printf("      encoded part size: %d bytes\n", n);
-    CHECK(n < 160,          "part encodes compactly (<160 bytes w/ Sketch2)");
+    CHECK(n < 200,          "part encodes compactly (<200 bytes w/ Sketch2 + names)");
 
     int ok = mcad_decode(&b, buf, n);
     CHECK(ok == 1,          "decode succeeded (magic+crc)");
@@ -70,6 +70,13 @@ static void test_save_roundtrip(void) {
           "Sketch2 first entity kind round-trips");
     CHECK(bsk && bsk->plane.normal.z == sk->plane.normal.z,
           "Sketch2 plane round-trips");
+
+    /* v3: feature names round-trip (so the FeatureManager tree isn't blank
+     * after a load). */
+    CHECK(bsk && strcmp(bsk->name, "Sketch1") == 0,
+          "feature name round-trips (Sketch1)");
+    CHECK(bex && strcmp(bex->name, "Boss-Extrude1") == 0,
+          "feature name round-trips (Boss-Extrude1)");
 }
 
 /* Round-trip a Sketch2 carrying a circle + a live constraint, end to end. */
