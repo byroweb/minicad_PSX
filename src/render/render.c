@@ -93,6 +93,7 @@ typedef struct {
     uint16_t faceid;            /* FaceId (pool handle) of the face          */
     int      bucket;            /* OT bucket                                 */
     long     minz;             /* per-face SZ approx for front-most test    */
+    uint8_t  holed;             /* face has >=1 inner loop -> draw as annulus */
 } FaceProj;
 
 static FaceProj g_fp[MAX_FACES];
@@ -192,6 +193,7 @@ static void project_faces(Brep *b) {
         fp->faceid = fi;
         fp->bucket = back ? -bucket : bucket;   /* sign flags backface */
         fp->minz   = otz;
+        fp->holed  = (f->inner_count > 0);      /* draw as see-through annulus */
     }
 }
 
@@ -272,16 +274,19 @@ static void emit_face(const FaceProj *fp, int moving, UiState *ui) {
         return;
     }
 
-    /* shaded flat quad */
-    POLY_F4 *pol = (POLY_F4 *)g_rc.nextpri;
-    setPolyF4(pol);
-    setXY4(pol, fp->sx[0],fp->sy[0], fp->sx[1],fp->sy[1],
-                fp->sx[2],fp->sy[2], fp->sx[3],fp->sy[3]);
-    if (face_sel)        setRGB0(pol, 0xff, 0x90, 0x20);   /* committed: orange */
-    else if (face_hover) setRGB0(pol, 0xe0, 0xe0, 0x20);   /* hover: yellow     */
-    else { int s=0x88; setRGB0(pol, s, s+0x10, s-0x08); }
-    addPrim(g_rc.ot[a][bucket], pol);
-    g_rc.nextpri = (uint8_t *)(pol + 1);
+    /* shaded flat quad — skipped for holed faces (the annulus pass fills the
+     * ring and leaves the bore open so you can see into the tube). */
+    if (!fp->holed) {
+        POLY_F4 *pol = (POLY_F4 *)g_rc.nextpri;
+        setPolyF4(pol);
+        setXY4(pol, fp->sx[0],fp->sy[0], fp->sx[1],fp->sy[1],
+                    fp->sx[2],fp->sy[2], fp->sx[3],fp->sy[3]);
+        if (face_sel)        setRGB0(pol, 0xff, 0x90, 0x20);   /* committed: orange */
+        else if (face_hover) setRGB0(pol, 0xe0, 0xe0, 0x20);   /* hover: yellow     */
+        else { int s=0x88; setRGB0(pol, s, s+0x10, s-0x08); }
+        addPrim(g_rc.ot[a][bucket], pol);
+        g_rc.nextpri = (uint8_t *)(pol + 1);
+    }
 
     /* edge outline one bucket in front; each edge colored by its own pick state */
     int ebkt = bucket > 0 ? bucket - 1 : 0;
@@ -315,6 +320,167 @@ static void emit_face(const FaceProj *fp, int moving, UiState *ui) {
     }
 }
 
+/* ---- face-with-hole: see-through annulus -----------------------------------
+ * A cap face pierced by the bore carries f->outer (the ±N square) AND
+ * f->inner[0] (the bore circle, N≈12 verts, wound OPPOSITE the outer loop).
+ * Drawing the solid outer quad would hide the bore, so instead we tile the
+ * RING between the circle and the square with N flat quads and leave the centre
+ * hole empty — you see straight into the tube wall, giving real depth.
+ *
+ * Method (radial-to-perimeter, watertight): work in the cap plane's 2 in-plane
+ * axes (the cap normal picks the dropped/constant axis). Centre C = mean of the
+ * inner verts. For each inner vert I[i] cast the ray C->I[i] to the outer square
+ * boundary (axis-aligned slab test) to get O[i], then emit quad (O[i],O[i+1],
+ * I[i+1],I[i]). All integer; projected with the same GTE idiom as project_faces
+ * and added at the cap's own OT bucket so it sorts exactly like the cap fill. */
+#define ANN_MAX 24
+
+static void emit_annulus(Brep *b, const FaceProj *fp, int moving, UiState *ui) {
+    if (moving) return;                         /* wireframe pass: skip fill */
+    Face *f = brep_face(b, fp->faceid);
+    if (!f || f->inner_count == 0) return;
+
+    /* dropped axis = component of the face normal with the largest magnitude;
+     * the other two are the in-plane (u,v) axes of the cap. */
+    long ax = f->normal.x < 0 ? -(long)f->normal.x : f->normal.x;
+    long ay = f->normal.y < 0 ? -(long)f->normal.y : f->normal.y;
+    long az = f->normal.z < 0 ? -(long)f->normal.z : f->normal.z;
+    int drop = (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
+    /* the constant (dropped) coordinate value, taken from any outer vert */
+    Loop *olp = (Loop *)pool_get(&b->loops, f->outer);
+    if (!olp) return;
+
+    /* outer square bounds in (u,v) plane coords */
+    int umin = 0x7fffffff, umax = -0x7fffffff, vmin = 0x7fffffff, vmax = -0x7fffffff;
+    int konst = 0;
+    {
+        HEdgeId h = olp->first_he;
+        do {
+            HalfEdge *he = brep_he(b, h);
+            Vertex   *vt = brep_vert(b, he->origin);
+            int comp[3] = { (int)vt->p.x, (int)vt->p.y, (int)vt->p.z };
+            konst = comp[drop];
+            int u = comp[(drop+1)%3], v = comp[(drop+2)%3];
+            if (u<umin)umin=u; if (u>umax)umax=u; if (v<vmin)vmin=v; if (v>vmax)vmax=v;
+            h = he->next;
+        } while (h != olp->first_he);
+    }
+
+    /* gather the inner loop verts (in-plane u,v) and accumulate the centre */
+    Loop *ilp = (Loop *)pool_get(&b->loops, f->inner[0]);
+    if (!ilp) return;
+    int iu[ANN_MAX], iv[ANN_MAX];
+    int n = 0;
+    long sum_u = 0, sum_v = 0;
+    {
+        HEdgeId h = ilp->first_he;
+        do {
+            HalfEdge *he = brep_he(b, h);
+            Vertex   *vt = brep_vert(b, he->origin);
+            int comp[3] = { (int)vt->p.x, (int)vt->p.y, (int)vt->p.z };
+            iu[n] = comp[(drop+1)%3];
+            iv[n] = comp[(drop+2)%3];
+            sum_u += iu[n]; sum_v += iv[n];
+            n++; h = he->next;
+        } while (h != ilp->first_he && n < ANN_MAX);
+    }
+    if (n < 3) return;
+    int cu = (int)(sum_u / n), cv = (int)(sum_v / n);
+
+    /* radial outer point O[i]: intersect ray C->I[i] with the square boundary,
+     * and record which boundary EDGE it lands on so a straddled square corner
+     * can be stitched in (keeps the ring watertight at the 4 corners).
+     * edge id: 0=u==umax(right) 1=v==vmax(top) 2=u==umin(left) 3=v==vmin(bot). */
+    int ou[ANN_MAX], ov[ANN_MAX], oe[ANN_MAX];
+    for (int i = 0; i < n; ++i) {
+        long du = iu[i] - cu, dv = iv[i] - cv;
+        long bu = du > 0 ? umax : umin;       /* u boundary the ray heads toward */
+        long bv = dv > 0 ? vmax : vmin;
+        long pu, pv; int e;
+        if (du == 0) {                         /* vertical ray: only v-wall */
+            pu = cu; pv = bv; e = dv > 0 ? 1 : 3;
+        } else if (dv == 0) {                  /* horizontal ray: only u-wall */
+            pu = bu; pv = cv; e = du > 0 ? 0 : 2;
+        } else {
+            long adu = du<0?-du:du, adv = dv<0?-dv:dv;
+            /* t_u = |bu-cu|/|du|, t_v = |bv-cv|/|dv|; smaller t = wall hit first.
+             * Compare via |bu-cu|*|dv| vs |bv-cv|*|du| (all magnitudes, so the
+             * ray never overshoots a wall onto the wrong edge). */
+            long dbu = bu - cu; if (dbu < 0) dbu = -dbu;
+            long dbv = bv - cv; if (dbv < 0) dbv = -dbv;
+            long cross_u = dbu * adv;          /* ~ t_u * adu*adv */
+            long cross_v = dbv * adu;
+            if (cross_u <= cross_v) {          /* u-wall reached first */
+                pu = bu; pv = cv + (bu - cu) * dv / du; e = du > 0 ? 0 : 2;
+            } else {                           /* v-wall reached first */
+                pv = bv; pu = cu + (bv - cv) * du / dv; e = dv > 0 ? 1 : 3;
+            }
+        }
+        ou[i] = (int)pu; ov[i] = (int)pv; oe[i] = e;
+    }
+
+    /* colour: match the cap (or its highlight) so the ring reads as solid */
+    int face_hover = (ui->hover_kind == KIND_FACE && ui->hover_id == fp->faceid);
+    int face_sel   = (ui->sel_kind   == KIND_FACE && ui->sel_id   == fp->faceid);
+    int r,g,bl;
+    if (face_sel)        { r=0xff; g=0x90; bl=0x20; }
+    else if (face_hover) { r=0xe0; g=0xe0; bl=0x20; }
+    else                 { int s=0x88; r=s; g=s+0x10; bl=s-0x08; }
+
+    int a = g_rc.active;
+    int bucket = fp->bucket < 0 ? -fp->bucket : fp->bucket;
+    volatile SVECTOR *sv = (volatile SVECTOR *)SPAD_BASE;
+
+    /* helper: rebuild a 3D SVECTOR from (u,v) + the constant dropped axis */
+    #define ANN_SET(slot, U, V) do {                                  \
+        int _c[3]; _c[drop]=konst; _c[(drop+1)%3]=(U); _c[(drop+2)%3]=(V); \
+        sv[slot].vx=(short)_c[0]; sv[slot].vy=(short)_c[1]; sv[slot].vz=(short)_c[2]; \
+    } while (0)
+
+    /* emit one flat triangle (3 in-plane points); GTE-project + addPrim. The
+     * fan over each ring cell keeps coverage watertight regardless of winding;
+     * F3s draw both faces so orientation only affects ordering, not visibility. */
+    #define ANN_TRI(au,av,bu,bv,cu_,cv_) do {                              \
+        ANN_SET(0,(au),(av)); ANN_SET(1,(bu),(bv)); ANN_SET(2,(cu_),(cv_)); \
+        long _flag;                                                        \
+        gte_ldv3((SVECTOR*)&sv[0],(SVECTOR*)&sv[1],(SVECTOR*)&sv[2]);      \
+        gte_rtpt(); gte_stflg(&_flag);                                     \
+        if (!(_flag & 0x80000000)) {                                       \
+            DVECTOR _s0,_s1,_s2;                                           \
+            gte_stsxy0(&_s0); gte_stsxy1(&_s1); gte_stsxy2(&_s2);          \
+            POLY_F3 *_p = (POLY_F3 *)g_rc.nextpri;                         \
+            setPolyF3(_p); setRGB0(_p, r, g, bl);                         \
+            setXY3(_p, _s0.vx,_s0.vy, _s1.vx,_s1.vy, _s2.vx,_s2.vy);       \
+            addPrim(g_rc.ot[a][bucket], _p);                              \
+            g_rc.nextpri = (uint8_t *)(_p + 1);                           \
+        }                                                                  \
+    } while (0)
+
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        /* base ring cell: inner edge I[i]->I[j] to outer pts O[i],O[j], as two
+         * triangles fanned from I[i]: (I[i],O[i],O[j]) + (I[i],O[j],I[j]). */
+        ANN_TRI(iu[i],iv[i], ou[i],ov[i], ou[j],ov[j]);
+        ANN_TRI(iu[i],iv[i], ou[j],ov[j], iu[j],iv[j]);
+        /* if O[i] and O[j] sit on different (adjacent) square edges, the segment
+         * O[i]->O[j] cuts the corner; fill that corner triangle so no gap shows.
+         * The shared corner = the u-limit edge's u with the v-limit edge's v. */
+        if (oe[i] != oe[j]) {
+            int e0 = oe[i], e1 = oe[j];
+            int has_u = (e0==0||e0==2||e1==0||e1==2);
+            int has_v = (e0==1||e0==3||e1==1||e1==3);
+            if (has_u && has_v) {              /* adjacent edges -> one corner */
+                int ku = (e0==0||e1==0) ? umax : umin;
+                int kv = (e0==1||e1==1) ? vmax : vmin;
+                ANN_TRI(iu[i],iv[i], ou[i],ov[i], ku,kv);
+                ANN_TRI(iu[i],iv[i], ku,kv, ou[j],ov[j]);
+            }
+        }
+    }
+    #undef ANN_TRI
+    #undef ANN_SET
+}
+
 /* Draw the on-screen cursor crosshair in the front-most OT bucket (always on
  * top). Built from two LINE_F2 spans crossing at (cursor_x, cursor_y). */
 static void draw_cursor(UiState *ui) {
@@ -336,7 +502,13 @@ static void draw_cursor(UiState *ui) {
 void render_model(Brep *b, UiState *ui, int moving) {
     project_faces(b);
     pick(ui);
-    for (int i = 0; i < g_fp_count; ++i) emit_face(&g_fp[i], moving, ui);
+    for (int i = 0; i < g_fp_count; ++i) {
+        emit_face(&g_fp[i], moving, ui);
+        /* see-through annulus for pierced caps; same backface gating as the
+         * solid fill (drop back-facing caps in solid mode). */
+        if (g_fp[i].holed && !(g_fp[i].bucket < 0 && !moving))
+            emit_annulus(b, &g_fp[i], moving, ui);
+    }
     draw_cursor(ui);
 }
 
