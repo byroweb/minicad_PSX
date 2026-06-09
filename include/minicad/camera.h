@@ -38,5 +38,16 @@ void cam_set_view(Camera *c, StdView v);
 /* Zoom-to-fit given a model half-extent (myriometers): pick a zoom that frames it. */
 void cam_zoom_to_fit(Camera *c, mym_t half_extent);
 
+/* Pan the pivot in the camera's screen-aligned X/Y plane. dsx/dsy are screen-
+ * space deltas (myriometers): +dsx moves the part right, +dsy moves it down.
+ * The motion is rotated by the current yaw so panning always tracks the screen
+ * axes, and scaled inversely with zoom so it feels uniform at any zoom level. */
+void cam_pan_screen(Camera *c, int32_t dsx, int32_t dsy);
+
+/* Recenter the orbit pivot on the part center (demo cube center). True
+ * selection-pivot (centroid of the picked entity) needs renderer cooperation
+ * and is a documented follow-up. */
+void cam_recenter(Camera *c);
+
 #endif /* MINICAD_CAMERA_H */
 #endif /* MINICAD_PSX */

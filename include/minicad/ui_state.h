@@ -40,6 +40,13 @@ typedef struct UiState {
     int8_t    want_undo, want_redo;
     int8_t    want_zoom_fit;     /* L3 pressed                    */
     int8_t    want_view;         /* StdView+1 chosen, 0 = none    */
+    int8_t    want_recenter;     /* R3 pressed -> recenter pivot   */
+    /* Damped-manipulation velocities (owned by input_apply). These accumulate
+     * the per-frame d_* intents and decay each frame so motion eases in/out
+     * instead of snapping. Sub-unit precision (shifted) so slow drift survives
+     * the decay; the camera consumes the high bits. Tuned for 60fps. */
+    int32_t   v_yaw, v_pitch;    /* orbit velocity (angle units << VEL_SHIFT) */
+    int32_t   v_zoom;            /* zoom velocity (1.12 << VEL_SHIFT)         */
 } UiState;
 
 #endif
