@@ -105,8 +105,16 @@ SkConstraint *sk_add_constraint(Sketch2 *s, SkConstraintKind kind,
                                 SkEntId e0, SkEntId e1, SkPointId a, SkPointId b,
                                 mym_t value);
 /* Resolve all DIRECT-rule constraints in a single integer pass. Returns the
- * number left UNSOLVED (i.e. needing the future iterative solver). */
+ * number left UNSOLVED (i.e. needing the iterative solver below). */
 int sk_resolve_direct(Sketch2 *s);
+
+/* Iterative fixed-point constraint solver (integer / fixed-point, NO floats).
+ * First applies sk_resolve_direct(), then drives the iterative constraint kinds
+ * — SKC_DIMENSION, SKC_PARALLEL, SKC_PERPENDICULAR, SKC_TANGENT — toward
+ * satisfaction with a damped Gauss-Seidel sweep that moves only non-fixed
+ * points. Caps iterations; deterministic. Returns the number of constraints
+ * still unsatisfied (0 = fully solved). */
+int sk_solve(Sketch2 *s);
 
 /* ---- profile extraction ----
  * Collect non-construction entities into an ordered boundary ring for the 3D

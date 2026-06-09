@@ -33,10 +33,9 @@ static void test_save_roundtrip(void) {
     Document a, b;
     doc_init(&a, "Part1");
     Feature *sk = doc_add(&a, FEAT_SKETCH, "Sketch1");
-    sk->sketch.count = 1;
-    sk->sketch.ent[0].kind = SK_RECT;
-    sk->sketch.ent[0].a = (Vec2i){-300,-300};
-    sk->sketch.ent[0].b = (Vec2i){ 300, 300};
+    sk->plane = plane_xy();
+    sk_init(&sk->sketch);
+    sk_add_rect(&sk->sketch, -300,-300, 300,300);
     Feature *ex = doc_add(&a, FEAT_EXTRUDE, "Boss-Extrude1");
     ex->p.extrude.sketch_id = sk->id; ex->p.extrude.dist = 600;
     ex->p.extrude.dir = 1; ex->p.extrude.op = OP_BOSS;
@@ -47,7 +46,7 @@ static void test_save_roundtrip(void) {
     int n = mcad_encode(&a, buf, sizeof buf);
     CHECK(n > 0,            "encode produced bytes");
     printf("      encoded part size: %d bytes\n", n);
-    CHECK(n < 64,           "part encodes compactly (<64 bytes)");
+    CHECK(n < 160,          "part encodes compactly (<160 bytes w/ Sketch2)");
 
     int ok = mcad_decode(&b, buf, n);
     CHECK(ok == 1,          "decode succeeded (magic+crc)");
@@ -56,6 +55,51 @@ static void test_save_roundtrip(void) {
     CHECK(bex && bex->p.extrude.dist == 600, "extrude distance round-trips");
     CHECK(bex && bex->p.extrude.op == OP_BOSS && bex->p.extrude.end == END_BLIND,
           "op/end round-trip");
+
+    /* Sketch2 contents (points/entities) and the plane round-trip */
+    Feature *bsk = doc_find(&b, sk->id);
+    CHECK(bsk && bsk->sketch.pt_count == sk->sketch.pt_count,
+          "Sketch2 point count round-trips");
+    CHECK(bsk && bsk->sketch.ent_count == sk->sketch.ent_count,
+          "Sketch2 entity count round-trips");
+    CHECK(bsk && bsk->sketch.pt[0].u == sk->sketch.pt[0].u
+              && bsk->sketch.pt[0].v == sk->sketch.pt[0].v,
+          "Sketch2 first point coords round-trip");
+    CHECK(bsk && bsk->sketch.ent[0].kind == sk->sketch.ent[0].kind,
+          "Sketch2 first entity kind round-trips");
+    CHECK(bsk && bsk->plane.normal.z == sk->plane.normal.z,
+          "Sketch2 plane round-trips");
+}
+
+/* Round-trip a Sketch2 carrying a circle + a live constraint, end to end. */
+static void test_save_roundtrip_sketch2(void) {
+    Document a, b;
+    doc_init(&a, "Part1");
+    Feature *sk = doc_add(&a, FEAT_SKETCH, "Sketch1");
+    sk->plane = plane_yz();
+    sk_init(&sk->sketch);
+    sk_add_circle(&sk->sketch, 10, 20, 150);
+    SkEntId ln = sk_add_line(&sk->sketch,
+                             sk_add_point(&sk->sketch, 0,0),
+                             sk_add_point(&sk->sketch, 100,0));
+    sk_add_constraint(&sk->sketch, SKC_DIMENSION, ln, SK_NONE,
+                      SK_NONE, SK_NONE, 1000);
+
+    uint8_t buf[512];
+    int n = mcad_encode(&a, buf, sizeof buf);
+    CHECK(n > 0, "sketch2 encode produced bytes");
+    int ok = mcad_decode(&b, buf, n);
+    CHECK(ok == 1, "sketch2 decode succeeded");
+    Feature *bsk = doc_find(&b, sk->id);
+    CHECK(bsk && bsk->sketch.con_count == 1, "constraint count round-trips");
+    CHECK(bsk && bsk->sketch.con[0].kind == SKC_DIMENSION
+              && bsk->sketch.con[0].value == 1000,
+          "DIMENSION constraint (kind+value) round-trips");
+    CHECK(bsk && bsk->sketch.ent[0].kind == SKE_CIRCLE
+              && bsk->sketch.ent[0].radius == 150,
+          "circle entity radius round-trips");
+    CHECK(bsk && bsk->plane.u_axis.y == sk->plane.u_axis.y,
+          "yz plane u_axis round-trips");
 }
 
 /* shared brep backing for op tests */
@@ -66,13 +110,20 @@ static void test_save_roundtrip(void) {
     Brep name; brep_init(&name, name##v,2048, name##he,8192, name##e,4096, \
                          name##l,2048, name##f,1024, name##s,64, name##so,64)
 
+/* helpers: build a Sketch2 holding a single rect / circle profile */
+static void mk_rect(Sketch2 *s, mym_t u0, mym_t v0, mym_t u1, mym_t v1) {
+    sk_init(s); sk_add_rect(s, u0, v0, u1, v1);
+}
+static void mk_circle(Sketch2 *s, mym_t cu, mym_t cv, mym_t r) {
+    sk_init(s); sk_add_circle(s, cu, cv, r);
+}
+
 static void test_extrude_boss(void) {
     DECLARE_BREP(brep);
-    Sketch sk; sk.plane = plane_xy(); sk.count = 1;
-    sk.ent[0].kind = SK_RECT;
-    sk.ent[0].a = (Vec2i){-300,-300}; sk.ent[0].b = (Vec2i){300,300};
+    Sketch2 sk; mk_rect(&sk, -300,-300, 300,300);
+    SketchPlane pl = plane_xy();
     OpParams pr = { OP_BOSS, END_BLIND, 600, 1, BREP_NONE };
-    SolidId sid = op_extrude(&brep, &sk, &pr, BREP_NONE, 1);
+    SolidId sid = op_extrude(&brep, &sk, &pl, &pr, BREP_NONE, 1);
     CHECK(sid != BREP_NONE,        "boss extrude returned a solid");
     CHECK(brep.verts.count == 8,   "box has 8 vertices");
     CHECK(brep.faces.count == 6,   "box has 6 faces");
@@ -82,10 +133,10 @@ static void test_extrude_boss(void) {
 
 static void test_extrude_circle(void) {
     DECLARE_BREP(brep);
-    Sketch sk; sk.plane = plane_xy(); sk.count = 1;
-    sk.ent[0].kind = SK_CIRCLE; sk.ent[0].a = (Vec2i){0,0}; sk.ent[0].radius = 150;
+    Sketch2 sk; mk_circle(&sk, 0,0, 150);
+    SketchPlane pl = plane_xy();
     OpParams pr = { OP_BOSS, END_BLIND, 600, 1, BREP_NONE };
-    SolidId sid = op_extrude(&brep, &sk, &pr, BREP_NONE, 1);
+    SolidId sid = op_extrude(&brep, &sk, &pl, &pr, BREP_NONE, 1);
     CHECK(sid != BREP_NONE,         "circle extrude (cylinder) returned a solid");
     /* Ø30 -> radius 150 -> 12 segments. 2 caps + 12 sides = 14 faces, 24 verts. */
     CHECK(brep.verts.count == 24,   "cylinder has 24 vertices (12-gon x2)");
@@ -96,13 +147,13 @@ static void test_extrude_circle(void) {
 static void test_through_all_is_cut_only(void) {
     DECLARE_BREP(brep);
     /* put a box in so solid_extent has something to measure */
-    Sketch box; box.plane=plane_xy(); box.count=1; box.ent[0].kind=SK_RECT;
-    box.ent[0].a=(Vec2i){-300,-300}; box.ent[0].b=(Vec2i){300,300};
+    Sketch2 box; mk_rect(&box, -300,-300, 300,300);
+    SketchPlane pl = plane_xy();
     OpParams bp={OP_BOSS,END_BLIND,600,1,BREP_NONE};
-    op_extrude(&brep,&box,&bp,BREP_NONE,1);
+    op_extrude(&brep,&box,&pl,&bp,BREP_NONE,1);
 
     OpParams cut = { OP_CUT, END_THROUGH_ALL, 0, 1, BREP_NONE };
-    int ok = resolve_end_condition(&brep, BREP_NONE, &box.plane, &cut, 0);
+    int ok = resolve_end_condition(&brep, BREP_NONE, &pl, &cut, 0);
     CHECK(ok == 1 && cut.dist > 600, "through-all cut resolves to clear the solid");
     /* Through-all spans the body extent ALONG THE CUT NORMAL (+2mm over-cut),
      * not the whole-model solid_extent: box z is [0,600], normal +z, so
@@ -110,18 +161,17 @@ static void test_through_all_is_cut_only(void) {
     CHECK(cut.dist == 620, "through-all spans body extent along normal + over-cut");
 
     OpParams bad = { OP_BOSS, END_THROUGH_ALL, 0, 1, BREP_NONE };
-    int bok = resolve_end_condition(&brep, BREP_NONE, &box.plane, &bad, 0);
+    int bok = resolve_end_condition(&brep, BREP_NONE, &pl, &bad, 0);
     CHECK(bok == 0, "through-all rejected for a boss (cut-only)");
 }
 
 static void test_revolve(void) {
     DECLARE_BREP(brep);
-    Sketch sk; sk.plane = plane_xy(); sk.count = 1;
-    sk.ent[0].kind = SK_RECT;
-    sk.ent[0].a = (Vec2i){200, -50}; sk.ent[0].b = (Vec2i){300, 50};
+    Sketch2 sk; mk_rect(&sk, 200,-50, 300,50);
+    SketchPlane pl = plane_xy();
     OpParams pr = { OP_BOSS, END_BLIND, 0, 1, BREP_NONE };
     Vec3i ax_o={0,0,0}, ax_d={0,FX_ONE,0};
-    SolidId sid = op_revolve(&brep, &sk, &pr, ax_o, ax_d, SIN_LEN, 12, BREP_NONE, 1);
+    SolidId sid = op_revolve(&brep, &sk, &pl, &pr, ax_o, ax_d, SIN_LEN, 12, BREP_NONE, 1);
     CHECK(sid != BREP_NONE,        "full revolve returned a solid");
     CHECK(brep.verts.count == 48,  "revolve: 4 profile pts x 12 steps = 48 verts");
     CHECK(brep.faces.count == 48,  "revolve: 4 sides x 12 steps = 48 faces");
@@ -186,11 +236,10 @@ static void test_winding_consistency(void) {
     /* demo cube */
     {
         DECLARE_BREP(brep);
-        Sketch sk; sk.plane = plane_xy(); sk.count = 1;
-        sk.ent[0].kind = SK_RECT;
-        sk.ent[0].a = (Vec2i){-300,-300}; sk.ent[0].b = (Vec2i){300,300};
+        Sketch2 sk; mk_rect(&sk, -300,-300, 300,300);
+        SketchPlane pl = plane_xy();
         OpParams pr = { OP_BOSS, END_BLIND, 600, 1, BREP_NONE };
-        SolidId sid = op_extrude(&brep, &sk, &pr, BREP_NONE, 1);
+        SolidId sid = op_extrude(&brep, &sk, &pl, &pr, BREP_NONE, 1);
         CHECK(sid != BREP_NONE, "winding: cube built");
         CHECK(all_faces_wind_outward(&brep),  "winding: all cube faces point outward");
         CHECK(all_twins_antiparallel(&brep),  "winding: cube twins anti-parallel");
@@ -198,10 +247,10 @@ static void test_winding_consistency(void) {
     /* cylinder */
     {
         DECLARE_BREP(brep);
-        Sketch sk; sk.plane = plane_xy(); sk.count = 1;
-        sk.ent[0].kind = SK_CIRCLE; sk.ent[0].a = (Vec2i){0,0}; sk.ent[0].radius = 150;
+        Sketch2 sk; mk_circle(&sk, 0,0, 150);
+        SketchPlane pl = plane_xy();
         OpParams pr = { OP_BOSS, END_BLIND, 600, 1, BREP_NONE };
-        SolidId sid = op_extrude(&brep, &sk, &pr, BREP_NONE, 1);
+        SolidId sid = op_extrude(&brep, &sk, &pl, &pr, BREP_NONE, 1);
         CHECK(sid != BREP_NONE, "winding: cylinder built");
         CHECK(all_faces_wind_outward(&brep), "winding: all cylinder faces point outward");
         CHECK(all_twins_antiparallel(&brep), "winding: cylinder twins anti-parallel");
@@ -209,12 +258,11 @@ static void test_winding_consistency(void) {
     /* full revolve (solid of revolution) */
     {
         DECLARE_BREP(brep);
-        Sketch sk; sk.plane = plane_xy(); sk.count = 1;
-        sk.ent[0].kind = SK_RECT;
-        sk.ent[0].a = (Vec2i){200,-50}; sk.ent[0].b = (Vec2i){300,50};
+        Sketch2 sk; mk_rect(&sk, 200,-50, 300,50);
+        SketchPlane pl = plane_xy();
         OpParams pr = { OP_BOSS, END_BLIND, 0, 1, BREP_NONE };
         Vec3i ax_o={0,0,0}, ax_d={0,FX_ONE,0};
-        SolidId sid = op_revolve(&brep, &sk, &pr, ax_o, ax_d, SIN_LEN, 12, BREP_NONE, 1);
+        SolidId sid = op_revolve(&brep, &sk, &pl, &pr, ax_o, ax_d, SIN_LEN, 12, BREP_NONE, 1);
         CHECK(sid != BREP_NONE, "winding: revolve built");
         CHECK(all_faces_wind_outward(&brep), "winding: all revolve faces point outward");
         CHECK(all_twins_antiparallel(&brep), "winding: revolve twins anti-parallel");
@@ -222,12 +270,11 @@ static void test_winding_consistency(void) {
     /* open (partial-sweep) revolve exercises the end caps too */
     {
         DECLARE_BREP(brep);
-        Sketch sk; sk.plane = plane_xy(); sk.count = 1;
-        sk.ent[0].kind = SK_RECT;
-        sk.ent[0].a = (Vec2i){200,-50}; sk.ent[0].b = (Vec2i){300,50};
+        Sketch2 sk; mk_rect(&sk, 200,-50, 300,50);
+        SketchPlane pl = plane_xy();
         OpParams pr = { OP_BOSS, END_BLIND, 0, 1, BREP_NONE };
         Vec3i ax_o={0,0,0}, ax_d={0,FX_ONE,0};
-        SolidId sid = op_revolve(&brep, &sk, &pr, ax_o, ax_d, SIN_LEN/2, 6, BREP_NONE, 1);
+        SolidId sid = op_revolve(&brep, &sk, &pl, &pr, ax_o, ax_d, SIN_LEN/2, 6, BREP_NONE, 1);
         CHECK(sid != BREP_NONE, "winding: open revolve built");
         CHECK(all_faces_wind_outward(&brep), "winding: all open-revolve faces point outward");
         CHECK(all_twins_antiparallel(&brep), "winding: open-revolve twins anti-parallel");
@@ -253,18 +300,16 @@ static int loop_len(Brep *b, LoopId lo) {
 static void build_demo_doc(Document *d) {
     doc_init(d, "Part1");
     Feature *sk = doc_add(d, FEAT_SKETCH, "Sketch1");
-    sk->sketch.plane = plane_xy(); sk->sketch.count = 1;
-    sk->sketch.ent[0].kind = SK_RECT;
-    sk->sketch.ent[0].a = (Vec2i){-300,-300}; sk->sketch.ent[0].b = (Vec2i){300,300};
+    sk->plane = plane_xy(); sk_init(&sk->sketch);
+    sk_add_rect(&sk->sketch, -300,-300, 300,300);
     Feature *ex = doc_add(d, FEAT_EXTRUDE, "Boss-Extrude1");
     ex->p.extrude.sketch_id = sk->id; ex->p.extrude.dist = 600;
     ex->p.extrude.dir = 1; ex->p.extrude.op = OP_BOSS;
     ex->p.extrude.end = END_BLIND; ex->p.extrude.target_face = 0;
     ex->depends_on[0] = sk->id; ex->dep_count = 1;
     Feature *sk2 = doc_add(d, FEAT_SKETCH, "Sketch2");
-    sk2->sketch.plane = plane_xy(); sk2->sketch.count = 1;
-    sk2->sketch.ent[0].kind = SK_CIRCLE;
-    sk2->sketch.ent[0].a = (Vec2i){0,0}; sk2->sketch.ent[0].radius = 150;
+    sk2->plane = plane_xy(); sk_init(&sk2->sketch);
+    sk_add_circle(&sk2->sketch, 0,0, 150);
     Feature *cut = doc_add(d, FEAT_EXTRUDE, "Cut-Extrude1");
     cut->p.extrude.sketch_id = sk2->id; cut->p.extrude.dist = 600;
     cut->p.extrude.dir = 1; cut->p.extrude.op = OP_CUT;
@@ -372,12 +417,134 @@ static void test_sketch_constraints(void) {
     CHECK(unsolved == 1, "dimension recorded as unsolved (awaits Newton solver)");
 }
 
+/* helper: integer length of a Sketch2 line entity */
+static mym_t line_length(const Sketch2 *s, SkEntId e) {
+    const SkEntity *L = &s->ent[e];
+    mym2_t dx = s->pt[L->p1].u - s->pt[L->p0].u;
+    mym2_t dy = s->pt[L->p1].v - s->pt[L->p0].v;
+    mym2_t l2 = dx*dx + dy*dy, lo=0, hi=l2<4096?4096:l2, r=0;
+    while (lo<=hi){ mym2_t m=(lo+hi)/2; if(m*m<=l2){r=m;lo=m+1;}else hi=m-1; }
+    return (mym_t)r;
+}
+
+/* PART 2: iterative solver drives a DIMENSION to the target length. */
+static void test_solve_dimension(void) {
+    Sketch2 s; sk_init(&s);
+    SkPointId p0 = sk_add_point(&s, 0, 0);
+    SkPointId p1 = sk_add_point(&s, 100, 0);      /* current length 100 */
+    SkEntId   ln = sk_add_line(&s, p0, p1);
+    /* anchor p0 so the solver moves p1 */
+    sk_add_constraint(&s, SKC_FIX, SK_NONE, SK_NONE, p0, SK_NONE, 0);
+    sk_add_constraint(&s, SKC_DIMENSION, ln, SK_NONE, SK_NONE, SK_NONE, 1000);
+    int unsolved = sk_solve(&s);
+    mym_t L = line_length(&s, ln);
+    printf("      solved length = %d (target 1000)\n", (int)L);
+    CHECK(unsolved == 0, "dimension: solver reports 0 unsolved");
+    CHECK(L >= 1000-4 && L <= 1000+4, "dimension: line length within +-4 of 1000");
+    CHECK(s.pt[p0].u == 0 && s.pt[p0].v == 0, "dimension: fixed point unmoved");
+}
+
+/* PART 2: solver drives a DIMENSION between two free points symmetrically. */
+static void test_solve_dimension_pts(void) {
+    Sketch2 s; sk_init(&s);
+    SkPointId a = sk_add_point(&s, -50, 0);
+    SkPointId b = sk_add_point(&s,  50, 0);       /* distance 100 */
+    sk_add_constraint(&s, SKC_DIMENSION, SK_NONE, SK_NONE, a, b, 600);
+    int unsolved = sk_solve(&s);
+    mym2_t dx = s.pt[b].u - s.pt[a].u, dy = s.pt[b].v - s.pt[a].v;
+    mym2_t l2 = dx*dx+dy*dy, lo=0,hi=l2<4096?4096:l2,r=0;
+    while(lo<=hi){mym2_t m=(lo+hi)/2; if(m*m<=l2){r=m;lo=m+1;}else hi=m-1;}
+    printf("      point distance = %d (target 600)\n", (int)r);
+    CHECK(unsolved == 0, "dim-pts: solver reports 0 unsolved");
+    CHECK(r >= 600-4 && r <= 600+4, "dim-pts: distance within +-4 of 600");
+}
+
+/* PART 2: PARALLEL constraint converges (two lines end up parallel). */
+static void test_solve_parallel(void) {
+    Sketch2 s; sk_init(&s);
+    /* reference line along +u, anchored */
+    SkPointId a0 = sk_add_point(&s, 0, 0), a1 = sk_add_point(&s, 200, 0);
+    SkEntId la = sk_add_line(&s, a0, a1);
+    sk_add_constraint(&s, SKC_FIX, SK_NONE, SK_NONE, a0, SK_NONE, 0);
+    sk_add_constraint(&s, SKC_FIX, SK_NONE, SK_NONE, a1, SK_NONE, 0);
+    /* second line skewed; anchor one end so only the other rotates */
+    SkPointId b0 = sk_add_point(&s, 0, 100), b1 = sk_add_point(&s, 150, 220);
+    SkEntId lb = sk_add_line(&s, b0, b1);
+    sk_add_constraint(&s, SKC_FIX, SK_NONE, SK_NONE, b0, SK_NONE, 0);
+    sk_add_constraint(&s, SKC_PARALLEL, la, lb, SK_NONE, SK_NONE, 0);
+    int unsolved = sk_solve(&s);
+    /* cross product of the two directions should be ~0 when parallel */
+    mym2_t ax = s.pt[a1].u-s.pt[a0].u, ay = s.pt[a1].v-s.pt[a0].v;
+    mym2_t bx = s.pt[b1].u-s.pt[b0].u, by = s.pt[b1].v-s.pt[b0].v;
+    mym2_t cross = ax*by - ay*bx;
+    printf("      parallel residual v = %d (b dir = %d,%d)\n",
+           (int)(s.pt[b1].v - s.pt[b0].v), (int)bx, (int)by);
+    CHECK(unsolved == 0, "parallel: solver reports 0 unsolved");
+    /* parallel to +u axis means b's v-component ~ 0 */
+    CHECK(cross >= -4*200 && cross <= 4*200, "parallel: cross product ~0");
+}
+
+/* PART 2: PERPENDICULAR constraint converges. */
+static void test_solve_perpendicular(void) {
+    Sketch2 s; sk_init(&s);
+    SkPointId a0 = sk_add_point(&s, 0, 0), a1 = sk_add_point(&s, 200, 0);
+    SkEntId la = sk_add_line(&s, a0, a1);
+    sk_add_constraint(&s, SKC_FIX, SK_NONE, SK_NONE, a0, SK_NONE, 0);
+    sk_add_constraint(&s, SKC_FIX, SK_NONE, SK_NONE, a1, SK_NONE, 0);
+    SkPointId b0 = sk_add_point(&s, 50, 0), b1 = sk_add_point(&s, 250, 40);
+    SkEntId lb = sk_add_line(&s, b0, b1);
+    sk_add_constraint(&s, SKC_FIX, SK_NONE, SK_NONE, b0, SK_NONE, 0);
+    sk_add_constraint(&s, SKC_PERPENDICULAR, la, lb, SK_NONE, SK_NONE, 0);
+    int unsolved = sk_solve(&s);
+    mym2_t ax = s.pt[a1].u-s.pt[a0].u, ay = s.pt[a1].v-s.pt[a0].v;
+    mym2_t bx = s.pt[b1].u-s.pt[b0].u, by = s.pt[b1].v-s.pt[b0].v;
+    mym2_t dot = ax*bx + ay*by;
+    printf("      perp dot = %d (b dir = %d,%d)\n", (int)dot, (int)bx, (int)by);
+    CHECK(unsolved == 0, "perpendicular: solver reports 0 unsolved");
+    CHECK(dot >= -4*200 && dot <= 4*200, "perpendicular: dot product ~0");
+}
+
+/* Profile extraction from a migrated Sketch2 rect and circle. */
+static void test_profile_extract_sketch2(void) {
+    /* rect: 4-point ring matching the legacy winding */
+    {
+        Sketch2 s; sk_init(&s);
+        sk_add_rect(&s, -300,-300, 300,300);
+        Vec2i ring[8];
+        int n = sk_extract_profile(&s, ring, 8);
+        CHECK(n == 4, "extract: rect yields a 4-point ring");
+        CHECK(ring[0].u==-300 && ring[0].v==-300, "extract: ring[0]=(-300,-300)");
+        CHECK(ring[1].u== 300 && ring[1].v==-300, "extract: ring[1]=( 300,-300)");
+        CHECK(ring[2].u== 300 && ring[2].v== 300, "extract: ring[2]=( 300, 300)");
+        CHECK(ring[3].u==-300 && ring[3].v== 300, "extract: ring[3]=(-300, 300)");
+    }
+    /* circle: negative count encodes radius, ring[0] = center */
+    {
+        Sketch2 s; sk_init(&s);
+        sk_add_circle(&s, 0,0, 150);
+        Vec2i ring[8];
+        int n = sk_extract_profile(&s, ring, 8);
+        CHECK(n == -150, "extract: circle yields -radius (-150)");
+        CHECK(ring[0].u==0 && ring[0].v==0, "extract: circle center at origin");
+    }
+    /* lift to 3D via profile_to_ring and confirm extrude builds a box */
+    {
+        DECLARE_BREP(brep);
+        Sketch2 sk; mk_rect(&sk, -300,-300, 300,300);
+        SketchPlane pl = plane_xy();
+        OpParams pr = { OP_BOSS, END_BLIND, 600, 1, BREP_NONE };
+        SolidId sid = op_extrude(&brep, &sk, &pl, &pr, BREP_NONE, 1);
+        CHECK(sid != BREP_NONE && brep.verts.count == 8,
+              "extract: migrated rect extrudes to an 8-vertex box");
+    }
+}
+
 /* helper: a document with one extrude whose distance we vary */
 static void doc_with_dist(Document *d, mym_t dist) {
     doc_init(d, "Part1");
     Feature *sk = doc_add(d, FEAT_SKETCH, "Sketch1");
-    sk->sketch.count = 1; sk->sketch.ent[0].kind = SK_RECT;
-    sk->sketch.ent[0].a = (Vec2i){-300,-300}; sk->sketch.ent[0].b = (Vec2i){300,300};
+    sk->plane = plane_xy(); sk_init(&sk->sketch);
+    sk_add_rect(&sk->sketch, -300,-300, 300,300);
     Feature *ex = doc_add(d, FEAT_EXTRUDE, "Boss-Extrude1");
     ex->p.extrude.sketch_id = sk->id; ex->p.extrude.dist = dist;
     ex->p.extrude.dir = 1; ex->p.extrude.op = OP_BOSS;
@@ -444,6 +611,7 @@ int main(void) {
     test_mm_str();
     test_sine();
     test_save_roundtrip();
+    test_save_roundtrip_sketch2();
     test_extrude_boss();
     test_extrude_circle();
     test_through_all_is_cut_only();
@@ -455,6 +623,11 @@ int main(void) {
     test_sketch_trim();
     test_sketch_intersection();
     test_sketch_constraints();
+    test_solve_dimension();
+    test_solve_dimension_pts();
+    test_solve_parallel();
+    test_solve_perpendicular();
+    test_profile_extract_sketch2();
     test_undo_redo();
     test_undo_depth_cap();
     printf("\n%s (%d failures)\n", fails ? "FAILED" : "PASSED", fails);

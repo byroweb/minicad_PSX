@@ -28,11 +28,9 @@ static void build_demo(Document *d) {
 
     /* Sketch1: a 60mm square (±300 mym) on the XY plane. */
     Feature *sk = doc_add(d, FEAT_SKETCH, "Sketch1");
-    sk->sketch.plane = plane_xy();
-    sk->sketch.count = 1;
-    sk->sketch.ent[0].kind = SK_RECT;
-    sk->sketch.ent[0].a = (Vec2i){ -300, -300 };
-    sk->sketch.ent[0].b = (Vec2i){  300,  300 };
+    sk->plane = plane_xy();
+    sk_init(&sk->sketch);
+    sk_add_rect(&sk->sketch, -300, -300, 300, 300);
 
     /* Boss-Extrude1: 60mm tall, blind. */
     Feature *ex = doc_add(d, FEAT_EXTRUDE, "Boss-Extrude1");
@@ -46,11 +44,9 @@ static void build_demo(Document *d) {
 
     /* Sketch2: a Ø30 circle centered, on the top face (datum TODO). */
     Feature *sk2 = doc_add(d, FEAT_SKETCH, "Sketch2");
-    sk2->sketch.plane = plane_xy();
-    sk2->sketch.count = 1;
-    sk2->sketch.ent[0].kind = SK_CIRCLE;
-    sk2->sketch.ent[0].a = (Vec2i){ 0, 0 };
-    sk2->sketch.ent[0].radius = 150;     /* 15.0 mm radius */
+    sk2->plane = plane_xy();
+    sk_init(&sk2->sketch);
+    sk_add_circle(&sk2->sketch, 0, 0, 150);     /* 15.0 mm radius */
 
     /* Cut-Extrude1: through-all hole. */
     Feature *cut = doc_add(d, FEAT_EXTRUDE, "Cut-Extrude1");

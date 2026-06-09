@@ -30,46 +30,38 @@ int circle_segments(mym_t radius){
     return 24;
 }
 
-int profile_to_ring(const Sketch *sk, Vec3i *ring, int cap){
-    if (sk->count == 0) return 0;
-    const SketchEntity *e0 = &sk->ent[0];
+int profile_to_ring(const Sketch2 *sk, const SketchPlane *pl, Vec3i *ring, int cap){
+    /* sk_extract_profile gives us the 2D boundary: a negative return encodes a
+     * circle (count = -radius, ring2d[0] = center); a positive return is an
+     * ordered chain of 2D boundary points (rect = 4). We then lift to 3D. */
+    Vec2i ring2d[64];
+    int rc = sk_extract_profile(sk, ring2d, 64);
 
-    if (e0->kind == SK_RECT) {
-        if (cap < 4) return 0;
-        Vec2i a = e0->a, c = e0->b;
-        Vec2i q[4] = { {a.u,a.v}, {c.u,a.v}, {c.u,c.v}, {a.u,c.v} };
-        for (int i=0;i<4;i++) ring[i] = sketch_to_3d(&sk->plane, q[i]);
-        return 4;
-    }
-    if (e0->kind == SK_CIRCLE) {
-        int n = circle_segments(e0->radius);
+    if (rc < 0) {                                 /* circle: radius = -rc */
+        mym_t radius = (mym_t)(-rc);
+        Vec2i center = ring2d[0];
+        int n = circle_segments(radius);
         if (cap < n) n = cap;
         /* additive angle step: one divide total, not one per segment (R3000
          * div is ~35 cyc; keep it out of the geometry-build loop). */
         int32_t step = SIN_LEN / n;
         int32_t ang  = 0;
         for (int i=0;i<n;i++){
-            mym_t x = (mym_t)(((mym2_t)e0->radius * fx_icos(ang)) >> FX_SHIFT);
-            mym_t y = (mym_t)(((mym2_t)e0->radius * fx_isin(ang)) >> FX_SHIFT);
-            Vec2i p = { e0->a.u + x, e0->a.v + y };
-            ring[i] = sketch_to_3d(&sk->plane, p);
+            mym_t x = (mym_t)(((mym2_t)radius * fx_icos(ang)) >> FX_SHIFT);
+            mym_t y = (mym_t)(((mym2_t)radius * fx_isin(ang)) >> FX_SHIFT);
+            Vec2i p = { center.u + x, center.v + y };
+            ring[i] = sketch_to_3d(pl, p);
             ang += step;
         }
         return n;
     }
-    /* TODO: general line-chain profile (walk SK_LINE segments into a ring). */
-    return 0;
-}
-
-int sketch_is_closed_profile(const Sketch *sk){
-    if (sk->count == 0) return 0;
-    if (sk->count == 1 && (sk->ent[0].kind==SK_RECT || sk->ent[0].kind==SK_CIRCLE)) return 1;
-    for (uint8_t i=0;i<sk->count;i++){
-        const SketchEntity *e=&sk->ent[i], *n=&sk->ent[(i+1)%sk->count];
-        if (e->kind!=SK_LINE) continue;
-        if (e->b.u!=n->a.u || e->b.v!=n->a.v) return 0;
+    if (rc >= 3) {                                /* line chain (rect = 4) */
+        int n = rc;
+        if (n > cap) return 0;
+        for (int i=0;i<n;i++) ring[i] = sketch_to_3d(pl, ring2d[i]);
+        return n;
     }
-    return 1;
+    return 0;
 }
 
 /* ---------------- end-condition resolution ---------------- */
@@ -305,17 +297,16 @@ static SolidId cut_through_fuse(Brep *b, const Vec3i *ring, int n, Vec3i cdir,
 }
 
 /* ---------------- extrude ---------------- */
-SolidId op_extrude(Brep *b, const Sketch *sk, const OpParams *params,
+SolidId op_extrude(Brep *b, const Sketch2 *sk, const SketchPlane *pl,
+                   const OpParams *params,
                    SolidId target_solid, uint16_t feature_id){
-    if (!sketch_is_closed_profile(sk)) return BREP_NONE;
-
     Vec3i ring[64];
-    int n = profile_to_ring(sk, ring, 64);
+    int n = profile_to_ring(sk, pl, ring, 64);
     if (n < 3) return BREP_NONE;
 
     /* translation vector = normal * (dir*dist), normal is 1.12 unit dir */
     mym_t d = (mym_t)(params->dir >= 0 ? params->dist : -params->dist);
-    Vec3i nrm = sk->plane.normal, vec;
+    Vec3i nrm = pl->normal, vec;
     vec.x = (mym_t)(((mym2_t)nrm.x*d)>>FX_SHIFT);
     vec.y = (mym_t)(((mym2_t)nrm.y*d)>>FX_SHIFT);
     vec.z = (mym_t)(((mym2_t)nrm.z*d)>>FX_SHIFT);
@@ -335,7 +326,7 @@ SolidId op_extrude(Brep *b, const Sketch *sk, const OpParams *params,
      * blind path; for through-all the tube ends land exactly on the caps. */
     (void)target_solid; (void)vec;
     if (params->end == END_THROUGH_ALL) {
-        Vec3i cdir = sk->plane.normal;
+        Vec3i cdir = pl->normal;
         if (params->dir < 0) { cdir.x = -cdir.x; cdir.y = -cdir.y; cdir.z = -cdir.z; }
         SolidId fused = cut_through_fuse(b, ring, n, cdir, feature_id);
         if (fused != BREP_NONE) return fused;
@@ -348,17 +339,17 @@ SolidId op_extrude(Brep *b, const Sketch *sk, const OpParams *params,
 }
 
 /* ---------------- revolve ---------------- */
-SolidId op_revolve(Brep *b, const Sketch *sk, const OpParams *params,
+SolidId op_revolve(Brep *b, const Sketch2 *sk, const SketchPlane *pl,
+                   const OpParams *params,
                    Vec3i axis_origin, Vec3i axis_dir,
                    int32_t sweep, int steps,
                    SolidId target_solid, uint16_t feature_id){
     (void)params; (void)target_solid; (void)axis_dir;
-    if (!sketch_is_closed_profile(sk)) return BREP_NONE;
     if (steps < 3) steps = 3;
     if (sweep == 0) sweep = SIN_LEN;          /* default full turn */
 
     Vec3i prof[64];
-    int n = profile_to_ring(sk, prof, 64);
+    int n = profile_to_ring(sk, pl, prof, 64);
     if (n < 3) return BREP_NONE;
 
     int full = (sweep >= SIN_LEN);

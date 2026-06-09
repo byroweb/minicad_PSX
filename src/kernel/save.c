@@ -43,7 +43,19 @@ int mcad_encode(const Document *d, uint8_t *buf, int cap) {
 
     for (uint16_t i = 0; i < d->feat_count; ++i) {
         const Feature *f = &d->feat[i];
-        if (o + 16 > cap - 12) return 0;           /* leave slack */
+        /* Worst-case bytes for this feature's body. A sketch is by far the
+         * largest (plane + up to 64 pts + 48 ents + 48 cons, each varint <=5B);
+         * other kinds are tiny. Guard once up front so the writes below cannot
+         * overrun the buffer. */
+        int need = 16;
+        if (f->kind == FEAT_SKETCH) {
+            need = 4*3*5                       /* plane axes */
+                 + 1 + f->sketch.pt_count  * 7
+                 + 1 + f->sketch.ent_count * 12
+                 + 1 + f->sketch.con_count * 10
+                 + 8;                          /* header/id slack */
+        }
+        if (o + need > cap - 12) return 0;          /* leave slack */
         payload[o++] = (uint8_t)f->kind;
         payload[o++] = (uint8_t)((f->suppressed ? 1 : 0) | (f->dep_count << 1));
         o += vu_write(payload + o, f->id);
@@ -68,19 +80,52 @@ int mcad_encode(const Document *d, uint8_t *buf, int cap) {
             payload[o++] = (uint8_t)f->p.ref.method;
             o += vs_write(payload + o, f->p.ref.offset);
             break;
-        case FEAT_SKETCH:
-            /* sketch entities packed compactly */
-            payload[o++] = f->sketch.count;
-            for (uint8_t e = 0; e < f->sketch.count; ++e) {
-                const SketchEntity *se = &f->sketch.ent[e];
+        case FEAT_SKETCH: {
+            /* parametric Sketch2: plane, then points / entities / constraints. */
+            const Sketch2 *s = &f->sketch;
+            const SketchPlane *pl = &f->plane;
+            const Vec3i axes[4] = { pl->origin, pl->u_axis, pl->v_axis, pl->normal };
+            for (int ai = 0; ai < 4; ++ai) {
+                o += vs_write(payload + o, axes[ai].x);
+                o += vs_write(payload + o, axes[ai].y);
+                o += vs_write(payload + o, axes[ai].z);
+            }
+            /* points: u, v, (fixed|alive) */
+            payload[o++] = s->pt_count;
+            for (uint8_t pi = 0; pi < s->pt_count; ++pi) {
+                const SkPoint *p = &s->pt[pi];
+                o += vs_write(payload + o, p->u);
+                o += vs_write(payload + o, p->v);
+                payload[o++] = (uint8_t)((p->fixed ? 1 : 0) | (p->alive ? 2 : 0));
+            }
+            /* entities: kind, p0, p1, center, radius, ang0, ang1, flags */
+            payload[o++] = s->ent_count;
+            for (uint8_t ei = 0; ei < s->ent_count; ++ei) {
+                const SkEntity *se = &s->ent[ei];
                 payload[o++] = (uint8_t)se->kind;
-                o += vs_write(payload + o, se->a.u);
-                o += vs_write(payload + o, se->a.v);
-                o += vs_write(payload + o, se->b.u);
-                o += vs_write(payload + o, se->b.v);
+                payload[o++] = se->p0;
+                payload[o++] = se->p1;
+                payload[o++] = se->center;
                 o += vs_write(payload + o, se->radius);
+                o += vs_write(payload + o, se->ang0);
+                o += vs_write(payload + o, se->ang1);
+                payload[o++] = (uint8_t)((se->construction ? 1 : 0)
+                                         | (se->alive ? 2 : 0));
+            }
+            /* constraints: kind, e0, e1, a, b, value, flags */
+            payload[o++] = s->con_count;
+            for (uint8_t ci = 0; ci < s->con_count; ++ci) {
+                const SkConstraint *c = &s->con[ci];
+                payload[o++] = (uint8_t)c->kind;
+                payload[o++] = c->e0;
+                payload[o++] = c->e1;
+                payload[o++] = c->a;
+                payload[o++] = c->b;
+                o += vs_write(payload + o, c->value);
+                payload[o++] = (uint8_t)((c->solved ? 1 : 0) | (c->alive ? 2 : 0));
             }
             break;
+        }
         default: break;
         }
     }
@@ -144,15 +189,50 @@ int mcad_decode(Document *d, const uint8_t *buf, int len) {
             o += vs_read(payload + o, &f->p.ref.offset);
             break;
         case FEAT_SKETCH: {
-            f->sketch.count = payload[o++];
-            for (uint8_t e = 0; e < f->sketch.count; ++e) {
-                SketchEntity *se = &f->sketch.ent[e];
-                se->kind = (SketchKind)payload[o++];
-                o += vs_read(payload + o, &se->a.u);
-                o += vs_read(payload + o, &se->a.v);
-                o += vs_read(payload + o, &se->b.u);
-                o += vs_read(payload + o, &se->b.v);
+            Sketch2 *s = &f->sketch;
+            SketchPlane *pl = &f->plane;
+            sk_init(s);
+            Vec3i *axes[4] = { &pl->origin, &pl->u_axis, &pl->v_axis, &pl->normal };
+            for (int ai = 0; ai < 4; ++ai) {
+                o += vs_read(payload + o, &axes[ai]->x);
+                o += vs_read(payload + o, &axes[ai]->y);
+                o += vs_read(payload + o, &axes[ai]->z);
+            }
+            s->pt_count = payload[o++];
+            for (uint8_t pi = 0; pi < s->pt_count; ++pi) {
+                SkPoint *p = &s->pt[pi];
+                o += vs_read(payload + o, &p->u);
+                o += vs_read(payload + o, &p->v);
+                uint8_t fl = payload[o++];
+                p->fixed = (fl & 1) ? 1 : 0;
+                p->alive = (fl & 2) ? 1 : 0;
+            }
+            s->ent_count = payload[o++];
+            for (uint8_t ei = 0; ei < s->ent_count; ++ei) {
+                SkEntity *se = &s->ent[ei];
+                se->kind   = (SkEntKind)payload[o++];
+                se->p0     = payload[o++];
+                se->p1     = payload[o++];
+                se->center = payload[o++];
                 o += vs_read(payload + o, &se->radius);
+                o += vs_read(payload + o, &se->ang0);
+                o += vs_read(payload + o, &se->ang1);
+                uint8_t fl = payload[o++];
+                se->construction = (fl & 1) ? 1 : 0;
+                se->alive        = (fl & 2) ? 1 : 0;
+            }
+            s->con_count = payload[o++];
+            for (uint8_t ci = 0; ci < s->con_count; ++ci) {
+                SkConstraint *c = &s->con[ci];
+                c->kind = (SkConstraintKind)payload[o++];
+                c->e0   = payload[o++];
+                c->e1   = payload[o++];
+                c->a    = payload[o++];
+                c->b    = payload[o++];
+                o += vs_read(payload + o, &c->value);
+                uint8_t fl = payload[o++];
+                c->solved = (fl & 1) ? 1 : 0;
+                c->alive  = (fl & 2) ? 1 : 0;
             }
             break;
         }

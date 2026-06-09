@@ -9,6 +9,7 @@
 #define MINICAD_FEATURE_H
 
 #include "minicad/ops.h"
+#include "minicad/sketch.h"
 
 typedef enum {
     FEAT_SKETCH = 0,
@@ -61,7 +62,8 @@ typedef struct {
         struct { RefMethod method; mym_t offset; } ref;
     } p;
 
-    Sketch  sketch;        /* valid when kind == FEAT_SKETCH        */
+    Sketch2     sketch;    /* valid when kind == FEAT_SKETCH (parametric)   */
+    SketchPlane plane;     /* the plane the sketch lives on (was Sketch.plane) */
     SolidId result;        /* B-rep solid produced (BREP_NONE if datum/sketch) */
 } Feature;
 

@@ -23,6 +23,7 @@ Feature *doc_add(Document *d, FeatureKind kind, const char *name) {
     f->suppressed = 0;
     f->result     = BREP_NONE;
     str_copy(f->name, name, FEAT_NAME_LEN);
+    if (kind == FEAT_SKETCH) { sk_init(&f->sketch); f->plane = plane_xy(); }
     return f;
 }
 
@@ -64,9 +65,10 @@ int doc_regen(Document *d, Brep *b) {
             pr.end    = f->p.extrude.end;
             pr.dir    = f->p.extrude.dir;
             pr.target = f->p.extrude.target_face ? f->p.extrude.target_face : BREP_NONE;
-            if (!resolve_end_condition(b, BREP_NONE, &skf->sketch.plane,
+            if (!resolve_end_condition(b, BREP_NONE, &skf->plane,
                                        &pr, f->p.extrude.dist)) return 0;
-            f->result = op_extrude(b, &skf->sketch, &pr, BREP_NONE, f->id);
+            f->result = op_extrude(b, &skf->sketch, &skf->plane, &pr,
+                                   BREP_NONE, f->id);
             break;
         }
         case FEAT_REVOLVE: {
@@ -75,7 +77,7 @@ int doc_regen(Document *d, Brep *b) {
             OpParams pr; pr.op = f->p.revolve.op; pr.end = END_BLIND;
             pr.dir = 1; pr.target = BREP_NONE; pr.dist = 0;
             Vec3i ax_o = {0,0,0}, ax_d = {0,FX_ONE,0};   /* MVP: revolve about Y */
-            f->result = op_revolve(b, &skf->sketch, &pr, ax_o, ax_d,
+            f->result = op_revolve(b, &skf->sketch, &skf->plane, &pr, ax_o, ax_d,
                                    f->p.revolve.sweep, f->p.revolve.steps,
                                    BREP_NONE, f->id);
             break;
