@@ -165,8 +165,13 @@ static void project_faces(Brep *b) {
         gte_nclip();
         gte_stopz(&nclip);
         /* always cull backfaces for picking/draw consistency (the moving-frame
-         * wireframe is handled by the same projected data, drawn as lines) */
-        int back = (nclip <= 0);
+         * wireframe is handled by the same projected data, drawn as lines).
+         * The kernel winds outer face loops so that a FRONT-facing face yields
+         * a negative screen-space nclip here (Y points down on the PS1), so a
+         * face is back-facing when nclip >= 0. (Using <= 0 rendered the solid
+         * inside-out: near faces culled, far faces + the bore interior showing
+         * through.) */
+        int back = (nclip >= 0);
 
         gte_stflg(&flag);
         if (flag & 0x80000000) continue;        /* GTE saturation -> drop */
@@ -488,12 +493,20 @@ static void emit_annulus(Brep *b, const FaceProj *fp, int moving, UiState *ui) {
 static void draw_cursor(UiState *ui) {
     int a = g_rc.active;
     int cx = ui->cursor_x, cy = ui->cursor_y;
-    const int R = 6;
+    /* Bright magenta reticle with a centre gap so it brackets the target
+     * rather than hiding it. Four arms.
+     * IMPORTANT: OT buckets 0-1 do NOT draw reliably on this setup (the panel
+     * code found bucket 2 is the dependable frontmost); the original cursor
+     * lived in bucket 0 and never showed. Draw into bucket 2, and BEFORE the
+     * panel runs, so within that bucket the cursor is added first => sits at the
+     * list tail => drawn last => on top of both the model and the panel. */
+    const int CURSOR_BKT = 2;
+    const int R = 10, G = 3;                 /* arm length, centre gap */
     LINE_F2 *ln = (LINE_F2 *)g_rc.nextpri;
-    setLineF2(ln); setRGB0(ln, 0xff, 0xff, 0xff);
-    setXY2(ln, cx-R, cy, cx+R, cy); addPrim(g_rc.ot[a][0], ln); ln++;
-    setLineF2(ln); setRGB0(ln, 0xff, 0xff, 0xff);
-    setXY2(ln, cx, cy-R, cx, cy+R); addPrim(g_rc.ot[a][0], ln); ln++;
+    setLineF2(ln); setRGB0(ln, 0xff, 0x20, 0xff); setXY2(ln, cx-R, cy, cx-G, cy); addPrim(g_rc.ot[a][CURSOR_BKT], ln); ln++;
+    setLineF2(ln); setRGB0(ln, 0xff, 0x20, 0xff); setXY2(ln, cx+G, cy, cx+R, cy); addPrim(g_rc.ot[a][CURSOR_BKT], ln); ln++;
+    setLineF2(ln); setRGB0(ln, 0xff, 0x20, 0xff); setXY2(ln, cx, cy-R, cx, cy-G); addPrim(g_rc.ot[a][CURSOR_BKT], ln); ln++;
+    setLineF2(ln); setRGB0(ln, 0xff, 0x20, 0xff); setXY2(ln, cx, cy+G, cx, cy+R); addPrim(g_rc.ot[a][CURSOR_BKT], ln); ln++;
     g_rc.nextpri = (uint8_t *)ln;
 }
 
