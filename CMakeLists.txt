@@ -51,6 +51,7 @@ if(MINICAD_PSX)
         src/render/render.c
         src/render/camera.c
         src/input/input.c
+        src/io/memcard.c
         src/main.c
     )
     target_include_directories(minicad PRIVATE include)

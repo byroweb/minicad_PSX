@@ -8,6 +8,7 @@
 #include "minicad/save.h"
 #include "minicad/history.h"
 #include "minicad/modeling.h"
+#include "minicad/memcard.h"
 
 #ifdef MINICAD_PSX
 /* Backing memory for the B-rep pools (the Model DB arena, statically sized).
@@ -65,6 +66,7 @@ static void build_demo(Document *d) {
 
 #include "minicad/camera.h"
 #include "minicad/ui_state.h"
+#include <psxgpu.h>      /* FntPrint for the on-screen status line */
 extern void render_init(void);
 extern void render_begin(void);
 extern void render_set_camera(const Camera *c);
@@ -91,8 +93,14 @@ int main(void) {
 
     render_init();
     input_init();
+    mc_init();
 
     Camera cam; cam_init(&cam);
+
+    /* .mcad scratch + a brief on-screen status line for file ops. */
+    static uint8_t s_mcad[512];
+    const char *status = "";
+    int status_ttl = 0;        /* frames the status line stays up */
 
     /* Frame loop with build/draw overlap (§6.2): poll + camera + OT-build for
      * frame N happen while the GPU draws frame N-1; render_end syncs + swaps. */
@@ -131,12 +139,42 @@ int main(void) {
             g_model.pending = 0;
         }
 
+        /* --- File ops (memory card). Card I/O blocks briefly; this happens at
+         * most once per button press, so the steady 60fps path is untouched. -- */
+        if (ui->want_save) {
+            int n = mcad_encode(&g_doc, s_mcad, (int)sizeof s_mcad);
+            if (n > 0 && mc_save(0, 0, 0, s_mcad, n) == 0)
+                status = "SAVED TO CARD";
+            else
+                status = "SAVE FAILED";
+            status_ttl = 120;
+        } else if (ui->want_load) {
+            int n = mc_load(0, 0, 0, s_mcad, (int)sizeof s_mcad);
+            if (n > 0 && mcad_decode(&g_doc, s_mcad, n)) {
+                doc_regen(&g_doc, &g_brep);
+                hist_init(&g_hist, &g_doc);     /* reset undo baseline to load */
+                model_init(&g_model);
+                status = "LOADED FROM CARD";
+            } else {
+                status = "LOAD FAILED";
+            }
+            status_ttl = 120;
+        } else if (ui->want_new) {
+            build_demo(&g_doc);
+            doc_regen(&g_doc, &g_brep);
+            hist_init(&g_hist, &g_doc);
+            model_init(&g_model);
+            status = "NEW PART";
+            status_ttl = 120;
+        }
+
         cam_update(&cam);
 
         render_begin();
         render_set_camera(&cam);
         render_model(&g_brep, ui, input_moving(ui));
         render_panel(&g_doc, ui);
+        if (status_ttl > 0) { FntPrint(-1, "%s\n", status); status_ttl--; }
         render_end();
     }
     return 0;

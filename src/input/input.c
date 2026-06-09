@@ -89,6 +89,7 @@ void input_poll(UiState **out) {
     g_ui.want_zoom_fit = 0;
     g_ui.want_view = 0;
     g_ui.want_recenter = 0;
+    g_ui.want_save = g_ui.want_load = g_ui.want_new = 0;
 
     /* orbit (R stick), unless R2 held (wheel spin -> UI layer). These feed the
      * damped velocity integrator in input_apply (see VEL_* there), so we only
@@ -105,9 +106,18 @@ void input_poll(UiState **out) {
     if (g_ui.cursor_y < 0) g_ui.cursor_y = 0;
     if (g_ui.cursor_y > SCREEN_H - 1) g_ui.cursor_y = SCREEN_H - 1;
 
-    /* filter scroll: L1 / R1 (unless used as pan modifier with L2/R2) */
-    if (PRESS(PAD_R1) && !DOWN(PAD_R2)) g_ui.filter = (SelFilter)((g_ui.filter+1)%FILT_COUNT);
-    if (PRESS(PAD_L1) && !DOWN(PAD_L2)) g_ui.filter = (SelFilter)((g_ui.filter+FILT_COUNT-1)%FILT_COUNT);
+    /* filter scroll: L1 / R1 (unless used as pan modifier with L2/R2, or as the
+     * Select+L1/R1 file combos below). */
+    if (!sel_held && PRESS(PAD_R1) && !DOWN(PAD_R2)) g_ui.filter = (SelFilter)((g_ui.filter+1)%FILT_COUNT);
+    if (!sel_held && PRESS(PAD_L1) && !DOWN(PAD_L2)) g_ui.filter = (SelFilter)((g_ui.filter+FILT_COUNT-1)%FILT_COUNT);
+
+    /* system / file combos (Select + a free button). Select-held suppresses the
+     * plain meanings of these buttons above (filter scroll / view cycle). */
+    if (sel_held) {
+        if (PRESS(PAD_START)) g_ui.want_save = 1;
+        if (PRESS(PAD_L1))    g_ui.want_load = 1;
+        if (PRESS(PAD_R1))    g_ui.want_new  = 1;
+    }
 
     /* zoom: L2 out / R2 in ; pan when combined with L1/R1.
      *   R1+R2 -> pan right + up ; L1+L2 -> pan left + down.
@@ -176,7 +186,7 @@ void input_poll(UiState **out) {
     if (PRESS(PAD_L3)) g_ui.want_zoom_fit = 1;
     if (PRESS(PAD_R3)) g_ui.want_recenter = 1;
     /* d-pad while L3 latched could pick a view; simplified: Start cycles views */
-    if (PRESS(PAD_START)) g_ui.want_view = (int8_t)(((g_ui.want_view) % 6) + 1);
+    if (!sel_held && PRESS(PAD_START)) g_ui.want_view = (int8_t)(((g_ui.want_view) % 6) + 1);
 
     #undef DOWN
     #undef PRESS
