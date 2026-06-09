@@ -78,6 +78,15 @@ typedef struct {
 
 void     doc_init(Document *d, const char *title);
 Feature *doc_add(Document *d, FeatureKind kind, const char *name);
+
+/* Build a SolidWorks-style auto name (e.g. "Sketch3", "Boss-Extrude2",
+ * "Cut-Extrude1", "Plane1") into `out` (capacity `cap`). The chosen prefix is
+ * fixed by (kind, op); the trailing number is (highest existing index among
+ * features sharing that prefix) + 1, so the result never collides with a name
+ * currently in `d` — even after intervening deletions. `op` is only consulted
+ * for extrude/revolve kinds. Result is always NUL-terminated. */
+void     feature_autoname(const Document *d, FeatureKind kind, OpType op,
+                          char *out, int cap);
 Feature *doc_find(Document *d, uint16_t id);
 void     doc_mark_dirty(Document *d, uint16_t id);   /* + transitive dependents */
 

@@ -27,6 +27,67 @@ Feature *doc_add(Document *d, FeatureKind kind, const char *name) {
     return f;
 }
 
+/* Return the prefix string used by SolidWorks-style auto naming for a given
+ * (kind, op). `op` matters only for extrude/revolve. */
+static const char *autoname_prefix(FeatureKind kind, OpType op) {
+    switch (kind) {
+    case FEAT_SKETCH:    return "Sketch";
+    case FEAT_EXTRUDE:   return op == OP_CUT ? "Cut-Extrude" : "Boss-Extrude";
+    case FEAT_REVOLVE:   return op == OP_CUT ? "Cut-Revolve" : "Boss-Revolve";
+    case FEAT_REF_PLANE: return "Plane";
+    case FEAT_REF_AXIS:  return "Axis";
+    case FEAT_REF_POINT: return "Point";
+    default:             return "Feature";
+    }
+}
+
+/* If `name` is exactly `prefix` followed by one or more decimal digits (and
+ * nothing else), return that integer (>= 0); otherwise return -1. */
+static long name_index_for_prefix(const char *name, const char *prefix) {
+    int i = 0;
+    for (; prefix[i]; ++i)
+        if (name[i] != prefix[i]) return -1;     /* prefix mismatch */
+    if (name[i] == '\0') return -1;              /* prefix with no trailing digits */
+    long v = 0;
+    for (; name[i]; ++i) {
+        if (name[i] < '0' || name[i] > '9') return -1;  /* non-digit suffix */
+        v = v * 10 + (name[i] - '0');
+    }
+    return v;
+}
+
+/* Append the decimal `n` (>= 0) to the NUL-terminated string in `out` without
+ * overflowing `cap`. */
+static void append_uint(char *out, int cap, long n) {
+    int len = 0;
+    while (out[len]) ++len;
+    char tmp[12];
+    int t = 0;
+    if (n == 0) tmp[t++] = '0';
+    while (n > 0 && t < (int)sizeof tmp) { tmp[t++] = (char)('0' + (n % 10)); n /= 10; }
+    while (t > 0 && len < cap - 1) out[len++] = tmp[--t];
+    out[len] = '\0';
+}
+
+void feature_autoname(const Document *d, FeatureKind kind, OpType op,
+                      char *out, int cap) {
+    if (cap <= 0) return;
+    out[0] = '\0';
+    if (cap == 1) return;
+    const char *prefix = autoname_prefix(kind, op);
+
+    long maxidx = 0;          /* highest existing index for this prefix (0 = none) */
+    if (d) {
+        for (uint16_t i = 0; i < d->feat_count; ++i) {
+            long idx = name_index_for_prefix(d->feat[i].name, prefix);
+            if (idx > maxidx) maxidx = idx;
+        }
+    }
+
+    str_copy(out, prefix, cap);
+    append_uint(out, cap, maxidx + 1);
+}
+
 Feature *doc_find(Document *d, uint16_t id) {
     for (uint16_t i = 0; i < d->feat_count; ++i)
         if (d->feat[i].id == id) return &d->feat[i];

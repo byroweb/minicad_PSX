@@ -114,15 +114,18 @@ int model_begin_extrude(ModelingState *m, Document *d, Brep *b,
 
     SketchPlane pl = plane_from_face(b, base);
 
-    Feature *sk = doc_add(d, FEAT_SKETCH,
-                          op == OP_CUT ? "Cut-Sketch" : "Boss-Sketch");
+    char nm[FEAT_NAME_LEN];
+    feature_autoname(d, FEAT_SKETCH, op, nm, FEAT_NAME_LEN);
+    Feature *sk = doc_add(d, FEAT_SKETCH, nm);
     if (!sk) return 0;
     sk->plane = pl;
     sk_init(&sk->sketch);
     sk_add_circle(&sk->sketch, 0, 0, MODEL_DEF_RADIUS);
 
-    Feature *ex = doc_add(d, FEAT_EXTRUDE,
-                          op == OP_CUT ? "Cut-Extrude" : "Boss-Extrude");
+    /* The sketch is already in `d`, but it uses the "Sketch" prefix so it won't
+     * collide with the extrude's "Boss-Extrude"/"Cut-Extrude" namespace. */
+    feature_autoname(d, FEAT_EXTRUDE, op, nm, FEAT_NAME_LEN);
+    Feature *ex = doc_add(d, FEAT_EXTRUDE, nm);
     if (!ex) { d->feat_count--; return 0; }   /* roll back the sketch */
     ex->p.extrude.sketch_id   = sk->id;
     ex->p.extrude.dir         = 1;

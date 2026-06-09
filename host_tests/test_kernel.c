@@ -447,6 +447,62 @@ static void test_modeling_core(void) {
     CHECK(brep.faces.count == facesc, "model: cancel restored B-rep faces");
 }
 
+/* ---- dynamic, collision-free feature naming (SolidWorks-style) ----------- */
+static Document g_namedoc;
+static void test_feature_autoname(void) {
+    /* demo doc has Sketch1/Sketch2 + Boss-Extrude1 + Cut-Extrude1 */
+    build_demo_doc(&g_namedoc);
+    char nm[FEAT_NAME_LEN];
+
+    feature_autoname(&g_namedoc, FEAT_SKETCH, OP_BOSS, nm, FEAT_NAME_LEN);
+    CHECK(strcmp(nm, "Sketch3") == 0, "autoname: next sketch is Sketch3");
+
+    feature_autoname(&g_namedoc, FEAT_EXTRUDE, OP_BOSS, nm, FEAT_NAME_LEN);
+    CHECK(strcmp(nm, "Boss-Extrude2") == 0, "autoname: next boss is Boss-Extrude2");
+
+    feature_autoname(&g_namedoc, FEAT_EXTRUDE, OP_CUT, nm, FEAT_NAME_LEN);
+    CHECK(strcmp(nm, "Cut-Extrude2") == 0, "autoname: next cut is Cut-Extrude2");
+
+    /* prefixes that don't yet appear start at 1 */
+    feature_autoname(&g_namedoc, FEAT_REVOLVE, OP_BOSS, nm, FEAT_NAME_LEN);
+    CHECK(strcmp(nm, "Boss-Revolve1") == 0, "autoname: first boss revolve is Boss-Revolve1");
+    feature_autoname(&g_namedoc, FEAT_REF_PLANE, OP_BOSS, nm, FEAT_NAME_LEN);
+    CHECK(strcmp(nm, "Plane1") == 0, "autoname: first plane is Plane1");
+
+    /* "Boss-Extrude" must not be confused with "Cut-Extrude" (distinct namespaces);
+     * also empty doc starts at 1 */
+    Document empty; doc_init(&empty, "Part1");
+    feature_autoname(&empty, FEAT_SKETCH, OP_BOSS, nm, FEAT_NAME_LEN);
+    CHECK(strcmp(nm, "Sketch1") == 0, "autoname: empty doc -> Sketch1");
+
+    /* two successive interactive begins produce distinct, non-colliding names */
+    DECLARE_BREP(brep);
+    int ok = model_regen_all(&g_namedoc, &brep);
+    CHECK(ok == 1, "autoname: namedoc regen");
+    FaceId side = find_side_face(&brep);
+    CHECK(side != BREP_NONE, "autoname: found a side face");
+
+    ModelingState m1; model_init(&m1);
+    ok = model_begin_extrude(&m1, &g_namedoc, &brep, side, OP_BOSS);
+    CHECK(ok == 1, "autoname: first begin_extrude ok");
+    Feature *sk1 = doc_find(&g_namedoc, m1.sketch_id);
+    Feature *ex1 = doc_find(&g_namedoc, m1.extrude_id);
+    CHECK(sk1 && strcmp(sk1->name, "Sketch3") == 0, "autoname: 1st interactive sketch is Sketch3");
+    CHECK(ex1 && strcmp(ex1->name, "Boss-Extrude2") == 0, "autoname: 1st interactive boss is Boss-Extrude2");
+    model_confirm(&m1, &g_namedoc, &brep, 0);
+
+    ModelingState m2; model_init(&m2);
+    ok = model_begin_extrude(&m2, &g_namedoc, &brep, side, OP_BOSS);
+    CHECK(ok == 1, "autoname: second begin_extrude ok");
+    Feature *sk2 = doc_find(&g_namedoc, m2.sketch_id);
+    Feature *ex2 = doc_find(&g_namedoc, m2.extrude_id);
+    CHECK(sk2 && strcmp(sk2->name, "Sketch4") == 0, "autoname: 2nd interactive sketch is Sketch4");
+    CHECK(ex2 && strcmp(ex2->name, "Boss-Extrude3") == 0, "autoname: 2nd interactive boss is Boss-Extrude3");
+    /* the two begins must not collide with each other */
+    CHECK(strcmp(sk1->name, sk2->name) != 0, "autoname: successive sketches distinct");
+    CHECK(strcmp(ex1->name, ex2->name) != 0, "autoname: successive bosses distinct");
+}
+
 static void test_sketch_points_shared(void) {
     Sketch2 s; sk_init(&s);
     /* a rectangle should create 4 shared points + 4 lines */
@@ -710,6 +766,7 @@ int main(void) {
     test_winding_consistency();
     test_through_all_fuses_one_solid();
     test_modeling_core();
+    test_feature_autoname();
     test_sketch_points_shared();
     test_sketch_construction();
     test_sketch_trim();
