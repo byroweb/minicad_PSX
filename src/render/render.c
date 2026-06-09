@@ -551,7 +551,7 @@ void render_model(Brep *b, UiState *ui, int moving) {
 #define FM_W        120
 #define FM_DIV_X    119
 #define FM_TITLE_H  10
-#define FM_ROW_Y0   12
+#define FM_ROW_Y0   22         /* first tree row sits below the top diag bar  */
 #define FM_PITCH    10
 #define FM_INDENT   6
 #define FM_TXT_X0   2
@@ -605,9 +605,65 @@ static TILE *fm_band(TILE *t, int row_y, int r, int g, int b) {
     return t;
 }
 
+/* Top diagnostic bar + bottom status bar. Same dark bg + white text as the
+ * FeatureManager, with a dark-blue (FM-title) border line. The top bar shows a
+ * draw-load gauge: the per-frame primitive-buffer fill %, color-coded green ->
+ * yellow -> red as the frame gets heavy. (On PS1 texture VRAM is essentially
+ * static, so this "VRAM%" tracks the GPU draw-list load, which is the thing that
+ * actually grows with scene complexity.) The bottom bar is a status line left
+ * blank for now. Drawn FIRST in FM_BKT so it sits on top; the load is sampled
+ * here, after the model's primitives (the heavy part) are already emitted. */
+#define BAR_H 18          /* tall enough that the label clears NTSC overscan  */
+static char *u2s(char *p, int v) {           /* 0..999 -> ascii; returns end */
+    if (v >= 100) *p++ = (char)('0' + (v / 100) % 10);
+    if (v >= 10)  *p++ = (char)('0' + (v / 10) % 10);
+    *p++ = (char)('0' + v % 10);
+    return p;
+}
+static void render_bars(void) {
+    int a = g_rc.active;
+    uint32_t *ot = g_rc.ot[a];
+    long used = (long)(g_rc.nextpri - g_rc.pribuf[a]);
+    int pct = (int)(used * 100 / SCRATCH);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    /* labels (white font): top = "VRAM NN% F:NN", bottom = status placeholder.
+     * Text sits ~9px in from the edges so it isn't eaten by overscan. */
+    char buf[24]; char *p = buf;
+    *p++ = 'V'; *p++ = 'R'; *p++ = 'A'; *p++ = 'M'; *p++ = ' ';
+    p = u2s(p, pct); *p++ = '%';
+    *p++ = ' '; *p++ = 'F'; *p++ = ':'; p = u2s(p, g_fp_count);
+    *p = 0;
+    void *pri = g_rc.nextpri;
+    pri = FntSort(&ot[FM_BKT], pri, 4, 9, buf);
+    pri = FntSort(&ot[FM_BKT], pri, 4, SCREEN_H - 16, "STATUS: READY");
+
+    /* gauge colour by load: green < 50, yellow < 80, red otherwise */
+    int r, g, b;
+    if (pct < 50)      { r = 40;  g = 200; b = 80;  }
+    else if (pct < 80) { r = 220; g = 190; b = 40;  }
+    else               { r = 220; g = 50;  b = 40;  }
+    int fw = pct * 58 / 100;
+    if (fw < 1) fw = 1;
+
+    /* Add front -> back (addPrim prepends): gauge fill, gauge track, the two
+     * border lines, then the two bar backgrounds. */
+    TILE *t = (TILE *)pri;
+    setTile(t); setWH(t, fw, 5); setXY0(t, SCREEN_W - 65, 9); setRGB0(t, r, g, b);    addPrim(ot[FM_BKT], t); t++;
+    setTile(t); setWH(t, 60, 7); setXY0(t, SCREEN_W - 66, 8); setRGB0(t, 20, 22, 28); addPrim(ot[FM_BKT], t); t++;
+    setTile(t); setWH(t, SCREEN_W, 1); setXY0(t, 0, BAR_H);            setRGB0(t, 30, 60, 110); addPrim(ot[FM_BKT], t); t++;
+    setTile(t); setWH(t, SCREEN_W, 1); setXY0(t, 0, SCREEN_H-BAR_H-1); setRGB0(t, 30, 60, 110); addPrim(ot[FM_BKT], t); t++;
+    setTile(t); setWH(t, SCREEN_W, BAR_H); setXY0(t, 0, 0);              setRGB0(t, 48, 52, 60); addPrim(ot[FM_BKT], t); t++;
+    setTile(t); setWH(t, SCREEN_W, BAR_H); setXY0(t, 0, SCREEN_H-BAR_H); setRGB0(t, 48, 52, 60); addPrim(ot[FM_BKT], t); t++;
+    g_rc.nextpri = (uint8_t *)t;
+}
+
 void render_panel(Document *doc, UiState *ui) {
     int a = g_rc.active;
     uint32_t *ot = g_rc.ot[a];
+
+    render_bars();   /* top/bottom diagnostic bars, on top (added first) */
 
     /* per-feature depth (single forward pass; parents precede children) */
     int depth[DOC_MAX_FEATURES];
