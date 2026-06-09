@@ -286,8 +286,13 @@ static void emit_face(const FaceProj *fp, int moving, UiState *ui) {
     if (!fp->holed) {
         POLY_F4 *pol = (POLY_F4 *)g_rc.nextpri;
         setPolyF4(pol);
+        /* The GPU draws a POLY_F4 as triangles (v0,v1,v2) and (v1,v2,v3), which
+         * only tile cleanly in "Z" order. Our loop verts are in PERIMETER order
+         * (0,1,2,3 around the face), so feed v3 then v2 to swap the last corner
+         * pair into Z order - otherwise one triangle is wrong and the face shows
+         * a transparent wedge. */
         setXY4(pol, fp->sx[0],fp->sy[0], fp->sx[1],fp->sy[1],
-                    fp->sx[2],fp->sy[2], fp->sx[3],fp->sy[3]);
+                    fp->sx[3],fp->sy[3], fp->sx[2],fp->sy[2]);
         if (face_sel)        setRGB0(pol, 0xff, 0x90, 0x20);   /* committed: orange */
         else if (face_hover) setRGB0(pol, 0xe0, 0xe0, 0x20);   /* hover: yellow     */
         else { int s=0x88; setRGB0(pol, s, s+0x10, s-0x08); }
@@ -517,7 +522,10 @@ static void draw_cursor(UiState *ui) {
  * picker writes hover_*; input.c commits to sel_* on Cross). */
 void render_model(Brep *b, UiState *ui, int moving) {
     project_faces(b);
-    pick(ui);
+    /* Freeze picking while the camera is moving: faces slide under the cursor
+     * during pan/tilt/rotate, which would make the hovered feature (and the
+     * FeatureManager highlight) jump around and flicker. Hold the last hover. */
+    if (!moving) pick(ui);
     for (int i = 0; i < g_fp_count; ++i) {
         emit_face(&g_fp[i], moving, ui);
         /* see-through annulus for pierced caps; same backface gating as the

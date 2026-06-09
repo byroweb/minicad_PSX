@@ -26,7 +26,7 @@
 #include "minicad/feature.h"
 #include "minicad/history.h"
 
-#define DZ 24   /* analog dead-zone */
+#define DZ 40   /* analog dead-zone (wide enough to reject stick noise/drift) */
 #define SCREEN_W 320
 #define SCREEN_H 240
 
@@ -251,6 +251,11 @@ void input_apply(UiState *ui, Camera *cam, Document *doc, History *hist) {
     int32_t t_pitch = (ui->d_pitch * ORBIT_GAIN) << VEL_SHIFT;
     ui->v_yaw   += (t_yaw   - ui->v_yaw)   >> EASE_SHIFT;
     ui->v_pitch += (t_pitch - ui->v_pitch) >> EASE_SHIFT;
+    /* Settle: when the stick is centred, snap a tiny residual velocity to 0 so
+     * a dead stick brings the model fully to rest. The integer ease-out (v +=
+     * (0-v)>>2) stalls at a small non-zero v that would otherwise creep. */
+    if (ui->d_yaw   == 0 && ui->v_yaw   > -(1 << VEL_SHIFT) && ui->v_yaw   < (1 << VEL_SHIFT)) ui->v_yaw   = 0;
+    if (ui->d_pitch == 0 && ui->v_pitch > -(1 << VEL_SHIFT) && ui->v_pitch < (1 << VEL_SHIFT)) ui->v_pitch = 0;
     cam->yaw   += ui->v_yaw   >> VEL_SHIFT;
     cam->pitch += ui->v_pitch >> VEL_SHIFT;
 
@@ -263,6 +268,7 @@ void input_apply(UiState *ui, Camera *cam, Document *doc, History *hist) {
     /* --- Damped zoom ------------------------------------------------------- */
     int32_t t_zoom = (ui->d_zoom * ZOOM_GAIN) << VEL_SHIFT;
     ui->v_zoom += (t_zoom - ui->v_zoom) >> EASE_SHIFT;
+    if (ui->d_zoom == 0 && ui->v_zoom > -(1 << VEL_SHIFT) && ui->v_zoom < (1 << VEL_SHIFT)) ui->v_zoom = 0;
     cam->zoom  += ui->v_zoom >> VEL_SHIFT;
     /* Clamp into a range that stays valid once folded into the 1.12 GTE matrix:
      * matrix entry = fx_mul(rot<=FX_ONE, zoom), so zoom*FX_ONE must fit int16.
