@@ -48,10 +48,14 @@ typedef struct UiState {
     int8_t    modeling_pending;  /* main.c writes 1 while an edit is in progress;
                                   * input.c reads it to route Cross/Circle to
                                   * confirm/cancel instead of select/deselect. */
-    /* System / file intents (consumed in main.c). Driven by Select + a free
-     * button combo so they don't clash with picking/modeling/manipulation:
-     *   Select + Start = save, Select + L1 = load, Select + R1 = new part. */
+    /* System / file intents (consumed in main.c). Chosen from the Start menu
+     * (see menu_open/menu_index): Save / Load / New. */
     int8_t    want_save, want_load, want_new;
+    /* Start opens a modal system menu; while open the d-pad moves the highlight
+     * and Cross picks Save(0)/Load(1)/New(2), Circle/Start closes. render.c
+     * draws it; input.c is modal while menu_open. */
+    int8_t    menu_open;
+    int8_t    menu_index;
     int8_t    want_zoom_fit;     /* L3 pressed                    */
     int8_t    want_view;         /* StdView+1 chosen, 0 = none    */
     int8_t    want_recenter;     /* R3 pressed -> recenter pivot   */

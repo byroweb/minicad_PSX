@@ -491,6 +491,7 @@ static void emit_annulus(Brep *b, const FaceProj *fp, int moving, UiState *ui) {
 /* Draw the on-screen cursor crosshair in the front-most OT bucket (always on
  * top). Built from two LINE_F2 spans crossing at (cursor_x, cursor_y). */
 static void draw_cursor(UiState *ui) {
+    if (ui->menu_open) return;                   /* hide the cursor under a menu */
     int a = g_rc.active;
     int cx = ui->cursor_x, cy = ui->cursor_y;
     /* Bright magenta reticle with a centre gap so it brackets the target
@@ -616,8 +617,27 @@ void render_panel(Document *doc, UiState *ui) {
 
     int max_rows = (SCREEN_H - FM_ROW_Y0) / FM_PITCH;
 
-    /* === Pass 1: TEXT (added FIRST so it draws LAST = on top) =============== */
     void *pri = g_rc.nextpri;
+
+    /* System menu overlay (modal). Added FIRST in this bucket so it sits in
+     * front of the tree + model. Within the menu, labels are added before the
+     * highlight bar and box so they stay on top (reverse draw order). */
+    if (ui->menu_open) {
+        static const char *const items[3] = { "SAVE", "LOAD", "NEW" };
+        const int mx = 134, my = 92, mw = 76, rh = 14;
+        pri = FntSort(&ot[FM_BKT], pri, mx + 6, my + 2, "SYSTEM");
+        for (int i = 0; i < 3; ++i)
+            pri = FntSort(&ot[FM_BKT], pri, mx + 12, my + 16 + i * rh, items[i]);
+        TILE *mt = (TILE *)pri;
+        setTile(mt); setWH(mt, mw - 4, rh);
+        setXY0(mt, mx + 2, my + 14 + ui->menu_index * rh);
+        setRGB0(mt, 40, 90, 220); addPrim(ot[FM_BKT], mt); mt++;   /* highlight */
+        setTile(mt); setWH(mt, mw, 16 + 3 * rh); setXY0(mt, mx, my);
+        setRGB0(mt, 40, 44, 56); addPrim(ot[FM_BKT], mt); mt++;    /* box bg    */
+        pri = (void *)mt;
+    }
+
+    /* === Pass 1: TEXT (added FIRST so it draws LAST = on top) =============== */
     pri = FntSort(&ot[FM_BKT], pri, FM_X + 2, 1, doc->title);
 
     for (int i = 0; i < n && i < max_rows; ++i) {

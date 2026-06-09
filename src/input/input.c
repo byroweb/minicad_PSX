@@ -2,15 +2,15 @@
  *
  * Control map (DESIGN §7):
  *   L stick : 3D cursor (snaps to nearest entity of active filter)
- *   R stick : orbit; (+R2) spins the contextual wheel
+ *   R stick : orbit (analog pad)
+ *   D-pad   : orbit (digital-pad fallback); while editing: value / distance
  *   L1/R1   : scroll selection FILTER
  *   L2/R2   : zoom out / in ; (+L1/R1) pan
- *   L3      : zoom-to-fit + 6-view picker ; R3 : recenter pivot on selection
- *   Cross   : select under cursor   Circle: deselect (hold = clear all)
- *   Triangle: execute wheel action  Square: step candidate (disambiguate)
- *   D-pad U/D : increment/decrement active value
- *   D-pad L/R : collapse/expand tree node (or value magnitude x10 / /10)
- *   Start   : system menu (save/load/new)
+ *   L3      : zoom-to-fit ; R3 : recenter pivot
+ *   Cross   : select under cursor (or confirm edit / menu pick)
+ *   Circle  : deselect (or cancel edit / close menu)
+ *   Triangle/Square : start boss / cut extrude on the selected face
+ *   Start   : open system menu (Save / Load / New) ; Select+Start : cycle views
  *   Select  : undo modifier — Select+Triangle = undo, Select+Circle = redo
  *
  * input_poll() reads the pad into a UiState; input_apply() turns that into
@@ -91,6 +91,27 @@ void input_poll(UiState **out) {
     g_ui.want_recenter = 0;
     g_ui.want_save = g_ui.want_load = g_ui.want_new = 0;
 
+    /* System menu (Start). MODAL: while open, the d-pad moves the highlight and
+     * Cross picks Save(0)/Load(1)/New(2); Circle or Start closes. Nothing else
+     * moves while it's open. Plain Start opens it; Select+Start still cycles the
+     * standard views (handled below). */
+    if (g_ui.menu_open) {
+        if (PRESS(PAD_UP))   g_ui.menu_index = (int8_t)((g_ui.menu_index + 2) % 3);
+        if (PRESS(PAD_DOWN)) g_ui.menu_index = (int8_t)((g_ui.menu_index + 1) % 3);
+        if (PRESS(PAD_CROSS)) {
+            if      (g_ui.menu_index == 0) g_ui.want_save = 1;
+            else if (g_ui.menu_index == 1) g_ui.want_load = 1;
+            else                           g_ui.want_new  = 1;
+            g_ui.menu_open = 0;
+        }
+        if (PRESS(PAD_CIRCLE) || PRESS(PAD_START)) g_ui.menu_open = 0;
+        g_prev = btn; *out = &g_ui; return;
+    }
+    if (!sel_held && PRESS(PAD_START)) {           /* open the system menu */
+        g_ui.menu_open = 1; g_ui.menu_index = 0;
+        g_prev = btn; *out = &g_ui; return;
+    }
+
     /* orbit (R stick), unless R2 held (wheel spin -> UI layer). These feed the
      * damped velocity integrator in input_apply (see VEL_* there), so we only
      * report the raw impulse here; the easing/decay happens on apply. */
@@ -111,13 +132,9 @@ void input_poll(UiState **out) {
     if (!sel_held && PRESS(PAD_R1) && !DOWN(PAD_R2)) g_ui.filter = (SelFilter)((g_ui.filter+1)%FILT_COUNT);
     if (!sel_held && PRESS(PAD_L1) && !DOWN(PAD_L2)) g_ui.filter = (SelFilter)((g_ui.filter+FILT_COUNT-1)%FILT_COUNT);
 
-    /* system / file combos (Select + a free button). Select-held suppresses the
-     * plain meanings of these buttons above (filter scroll / view cycle). */
-    if (sel_held) {
-        if (PRESS(PAD_START)) g_ui.want_save = 1;
-        if (PRESS(PAD_L1))    g_ui.want_load = 1;
-        if (PRESS(PAD_R1))    g_ui.want_new  = 1;
-    }
+    /* Select+Start cycles the 6 standard views (plain Start opens the system
+     * menu instead; save/load/new live there now). */
+    if (sel_held && PRESS(PAD_START)) g_ui.want_view = (int8_t)(((g_ui.want_view) % 6) + 1);
 
     /* zoom: L2 out / R2 in ; pan when combined with L1/R1.
      *   R1+R2 -> pan right + up ; L1+L2 -> pan left + down.
@@ -175,18 +192,25 @@ void input_poll(UiState **out) {
     if (sel_held && PRESS(PAD_TRIANGLE)) g_ui.want_undo = 1;
     if (sel_held && PRESS(PAD_CIRCLE))   g_ui.want_redo = 1;
 
-    /* d-pad value editing. While pending, Up/Down also nudge the live extrude
-     * distance via want_dist_delta (consumed by main.c -> model_set_distance). */
-    if (PRESS(PAD_UP))    { g_ui.active_value += g_ui.value_step; if (pending) g_ui.want_dist_delta += g_ui.value_step; }
-    if (PRESS(PAD_DOWN))  { g_ui.active_value -= g_ui.value_step; if (pending) g_ui.want_dist_delta -= g_ui.value_step; }
-    if (PRESS(PAD_RIGHT)) g_ui.value_step  *= 10;
-    if (PRESS(PAD_LEFT))  g_ui.value_step   = (g_ui.value_step > 1) ? g_ui.value_step/10 : 1;
+    /* d-pad: ORBIT when idle, value/distance edit when a feature edit is pending.
+     * The idle orbit is the digital-pad fallback so the model can be inspected
+     * without an analog stick (the right stick still orbits when the pad is in
+     * analog mode). Held d-pad feeds the same damped integrator as the stick. */
+    if (pending) {
+        if (PRESS(PAD_UP))    { g_ui.active_value += g_ui.value_step; g_ui.want_dist_delta += g_ui.value_step; }
+        if (PRESS(PAD_DOWN))  { g_ui.active_value -= g_ui.value_step; g_ui.want_dist_delta -= g_ui.value_step; }
+        if (PRESS(PAD_RIGHT)) g_ui.value_step  *= 10;
+        if (PRESS(PAD_LEFT))  g_ui.value_step   = (g_ui.value_step > 1) ? g_ui.value_step/10 : 1;
+    } else {
+        if (DOWN(PAD_UP))    { g_ui.d_pitch += 6; g_ui.moving = 1; }
+        if (DOWN(PAD_DOWN))  { g_ui.d_pitch -= 6; g_ui.moving = 1; }
+        if (DOWN(PAD_LEFT))  { g_ui.d_yaw   -= 6; g_ui.moving = 1; }
+        if (DOWN(PAD_RIGHT)) { g_ui.d_yaw   += 6; g_ui.moving = 1; }
+    }
 
-    /* L3 zoom-to-fit + view picker; R3 recenter pivot */
+    /* L3 zoom-to-fit ; R3 recenter pivot */
     if (PRESS(PAD_L3)) g_ui.want_zoom_fit = 1;
     if (PRESS(PAD_R3)) g_ui.want_recenter = 1;
-    /* d-pad while L3 latched could pick a view; simplified: Start cycles views */
-    if (!sel_held && PRESS(PAD_START)) g_ui.want_view = (int8_t)(((g_ui.want_view) % 6) + 1);
 
     #undef DOWN
     #undef PRESS
