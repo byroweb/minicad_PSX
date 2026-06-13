@@ -26,8 +26,19 @@
 
 #define OT_LEN     1024
 #define SCRATCH    (24*1024)
-#define SCREEN_W   320
+/* Render width comes from camera.h (the one knob). 368x240 = a gentle hi-res:
+ * NTSC shows it in the same physical width as 320, so the 8px font is ~13%
+ * smaller and pixels are ~0.87:1 (barely condensed); camera.c corrects the
+ * model's Y aspect. Two 368x240 buffers stack at y=0/240 in VRAM (1024x512),
+ * font at x=960 — plenty of room. */
+#define SCREEN_W   MINICAD_SCREEN_W
 #define SCREEN_H   240
+/* FeatureManager dock width (px). The 3D viewport ("blue field") is the area to
+ * its right, [FM_PANEL_W, SCREEN_W); VIEW_CX is that region's center so the model
+ * sits in the middle of the *visible* canvas, not the middle of the whole frame.
+ * 136px @ 368: a touch wider than the original 120px @ 320 panel (17 glyph cols). */
+#define FM_PANEL_W 136
+#define VIEW_CX    ((FM_PANEL_W + SCREEN_W) / 2)
 
 /* The 1KB scratchpad lives at 0x1F800000 (KSEG). Use it for the hottest
  * per-face working set: the 4 transformed screen verts + a small staging slot.
@@ -56,7 +67,7 @@ void render_init(void) {
     g_rc.draw[0].isbg = 1; g_rc.draw[1].isbg = 1;
     g_rc.active = 0;
     InitGeom();
-    gte_SetGeomOffset(SCREEN_W/2, SCREEN_H/2);
+    gte_SetGeomOffset(VIEW_CX, SCREEN_H/2);   /* center model in the blue canvas, not the whole frame */
     gte_SetGeomScreen(SCREEN_W);            /* projection plane distance */
     FntLoad(960, 0);
     FntOpen(8, 8, 304, 60, 0, 256);
@@ -64,8 +75,9 @@ void render_init(void) {
 
 void render_set_camera(const Camera *c) {
     gte_SetRotMatrix(&c->m);
-    gte_SetTransMatrix(&c->m);              /* trans vector set below */
-    /* load translation into GTE TRX/TRY/TRZ */
+    /* load translation into GTE TRX/TRY/TRZ. (camera.c maintains c->trans but
+     * never c->m.t, so we set the translation registers straight from the
+     * VECTOR; a gte_SetTransMatrix(&c->m) here would only load stale t[].) */
     gte_SetTransVector((VECTOR *)&c->trans);
 }
 
@@ -556,14 +568,14 @@ void render_model(Brep *b, UiState *ui, int moving) {
  *   bucket 0: cursor (already drawn there by draw_cursor) stays on top.
  */
 #define FM_X        0
-#define FM_W        120
-#define FM_DIV_X    119
+#define FM_W        FM_PANEL_W
+#define FM_DIV_X    (FM_W - 1)
 #define FM_TITLE_H  10
 #define FM_ROW_Y0   22         /* first tree row sits below the top diag bar  */
 #define FM_PITCH    10
 #define FM_INDENT   6
 #define FM_TXT_X0   2
-#define FM_COLS     15            /* 120px / 8px glyph                       */
+#define FM_COLS     (FM_W / 8)    /* chars that fit (8px glyph)              */
 /* The whole panel lives in ONE OT bucket that is GUARANTEED to sort in front
  * of the 3D model. The model's quads/edges land in low buckets (otz>>2, plus a
  * per-feature ±1 nudge, with edges one bucket nearer), so buckets 0/1 can be
