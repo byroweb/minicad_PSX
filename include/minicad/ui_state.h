@@ -38,6 +38,7 @@ typedef struct UiState {
     int32_t   active_value;      /* value d-pad edits             */
     int32_t   value_step;
     int8_t    want_undo, want_redo;
+    int8_t    want_tree_prev, want_tree_next;  /* d-pad up/down -> move FM tree selection */
     /* Interactive-modeling intents (consumed in main.c, driven by input.c).
      * want_new_boss/cut: start an extrude on the selected face (Triangle/Square).
      * want_confirm/cancel: finalise/abort the pending edit (Cross/Circle while
@@ -58,6 +59,7 @@ typedef struct UiState {
     int8_t    menu_index;
     int8_t    want_zoom_fit;     /* L3 pressed                    */
     int8_t    want_view;         /* StdView+1 chosen, 0 = none    */
+    int8_t    cur_view;          /* persistent view index 0..5 for Select+Start cycling */
     int8_t    want_recenter;     /* R3 pressed -> recenter pivot   */
     /* Damped-manipulation velocities (owned by input_apply). These accumulate
      * the per-frame d_* intents and decay each frame so motion eases in/out

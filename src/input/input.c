@@ -2,16 +2,17 @@
  *
  * Control map (DESIGN §7):
  *   L stick : 3D cursor (snaps to nearest entity of active filter)
- *   R stick : orbit (analog pad)
- *   D-pad   : orbit (digital-pad fallback); while editing: value / distance
- *   L1/R1   : scroll selection FILTER
- *   L2/R2   : zoom out / in ; (+L1/R1) pan
+ *   R stick : orbit ; hold L1 + R stick : PAN (screen-aligned)
+ *   D-pad   : navigate FeatureManager tree (Up/Down) ; while editing: value/dist
+ *   R1      : scroll selection FILTER fwd ; Select+R1 : back
+ *   L1      : pan modifier (hold, with right stick)
+ *   L2/R2   : zoom out / in
  *   L3      : zoom-to-fit ; R3 : recenter pivot
  *   Cross   : select under cursor (or confirm edit / menu pick)
  *   Circle  : deselect (or cancel edit / close menu)
  *   Triangle/Square : start boss / cut extrude on the selected face
  *   Start   : open system menu (Save / Load / New) ; Select+Start : cycle views
- *   Select  : undo modifier — Select+Triangle = undo, Select+Circle = redo
+ *             (also resets zoom) ; Select+Triangle = undo, Select+Circle = redo
  *
  * input_poll() reads the pad into a UiState; input_apply() turns that into
  * camera motion + edit intents (undo/redo/view). Needs your emulator check.
@@ -27,13 +28,15 @@
 #include "minicad/history.h"
 
 #define DZ 40   /* analog dead-zone (wide enough to reject stick noise/drift) */
-#define SCREEN_W 320
+#define SCREEN_W MINICAD_SCREEN_W   /* shared knob in camera.h */
 #define SCREEN_H 240
 
 static UiState  g_ui;
 static uint8_t  g_padbuf[2][34];
 static uint16_t g_prev = 0xFFFF;
 static int      g_primed = 0;       /* seen one valid pad frame yet? */
+static int32_t  s_cur_fx = 0, s_cur_fy = 0;  /* cursor sub-pixel accumulators */
+#define CURSOR_DIV  170             /* larger = slower cursor (axis is -128..127) */
 
 void input_init(void) {
     InitPAD(g_padbuf[0], 34, g_padbuf[1], 34);
@@ -46,6 +49,7 @@ void input_init(void) {
     g_ui.cursor_y = SCREEN_H / 2;
     g_ui.hover_kind = KIND_NONE;
     g_ui.sel_kind   = KIND_NONE;
+    g_ui.cur_view   = 5;             /* so the first Select+Start wraps to VIEW_FRONT (0) */
 }
 
 static int axis(uint8_t raw) {
@@ -83,6 +87,7 @@ void input_poll(UiState **out) {
     g_ui.d_yaw = g_ui.d_pitch = g_ui.d_zoom = 0;
     g_ui.d_pan_x = g_ui.d_pan_y = 0;
     g_ui.want_undo = g_ui.want_redo = 0;
+    g_ui.want_tree_prev = g_ui.want_tree_next = 0;
     g_ui.want_new_boss = g_ui.want_new_cut = 0;
     g_ui.want_confirm = g_ui.want_cancel = 0;
     g_ui.want_dist_delta = 0;
@@ -112,44 +117,57 @@ void input_poll(UiState **out) {
         g_prev = btn; *out = &g_ui; return;
     }
 
-    /* orbit (R stick), unless R2 held (wheel spin -> UI layer). These feed the
-     * damped velocity integrator in input_apply (see VEL_* there), so we only
-     * report the raw impulse here; the easing/decay happens on apply. */
-    if (!DOWN(PAD_R2) && (rx || ry)) {
-        g_ui.d_yaw   = rx >> 3;
-        g_ui.d_pitch = -(ry >> 3);
-        g_ui.moving  = 1;
+    /* Right stick: ORBIT normally, or PAN while L1 is held. Orbit feeds the
+     * damped velocity integrator in input_apply (see VEL_*); we only report the
+     * raw impulse here. Pan is screen-aligned + zoom-scaled (cam_pan_screen):
+     * stick-right = pan right, stick-up = pan up (matches d_pan sign convention,
+     * stick up reads negative). */
+    if (rx || ry) {
+        if (DOWN(PAD_L1)) {
+            g_ui.d_pan_x += rx >> 5;
+            g_ui.d_pan_y += ry >> 5;
+            g_ui.moving   = 1;
+        } else {
+            g_ui.d_yaw   = rx >> 3;
+            g_ui.d_pitch = -(ry >> 3);
+            g_ui.moving  = 1;
+        }
     }
-    /* cursor (L stick), clamped to the 320x240 viewport */
-    if (lx || ly) { g_ui.cursor_x += (int16_t)(lx >> 5); g_ui.cursor_y += (int16_t)(ly >> 5); }
+    /* cursor (L stick), clamped to the 320x240 viewport. The stick axis is only
+     * -128..+127, so a plain `>>7` (to slow it ~4x) truncates every positive
+     * value to 0 -> the cursor could only move up/left. Instead accumulate the
+     * raw axis sub-pixel and divide (symmetric toward zero) so both directions
+     * move at ~1/4 the old `>>5` rate. CURSOR_DIV tunes the speed. */
+    if (lx || ly) {
+        s_cur_fx += lx; s_cur_fy += ly;
+        int dx = s_cur_fx / CURSOR_DIV, dy = s_cur_fy / CURSOR_DIV;
+        g_ui.cursor_x += (int16_t)dx; g_ui.cursor_y += (int16_t)dy;
+        s_cur_fx -= dx * CURSOR_DIV;  s_cur_fy -= dy * CURSOR_DIV;
+    }
     if (g_ui.cursor_x < 0) g_ui.cursor_x = 0;
     if (g_ui.cursor_x > SCREEN_W - 1) g_ui.cursor_x = SCREEN_W - 1;
     if (g_ui.cursor_y < 0) g_ui.cursor_y = 0;
     if (g_ui.cursor_y > SCREEN_H - 1) g_ui.cursor_y = SCREEN_H - 1;
 
-    /* filter scroll: L1 / R1 (unless used as pan modifier with L2/R2, or as the
-     * Select+L1/R1 file combos below). */
-    if (!sel_held && PRESS(PAD_R1) && !DOWN(PAD_R2)) g_ui.filter = (SelFilter)((g_ui.filter+1)%FILT_COUNT);
-    if (!sel_held && PRESS(PAD_L1) && !DOWN(PAD_L2)) g_ui.filter = (SelFilter)((g_ui.filter+FILT_COUNT-1)%FILT_COUNT);
+    /* filter scroll: R1 cycles the selection FILTER forward (wraps). L1 is the
+     * pan modifier now (hold L1 + right stick), so it no longer scrolls filters;
+     * Select+R1 cycles backward. */
+    if (!sel_held && PRESS(PAD_R1)) g_ui.filter = (SelFilter)((g_ui.filter+1)%FILT_COUNT);
+    if ( sel_held && PRESS(PAD_R1)) g_ui.filter = (SelFilter)((g_ui.filter+FILT_COUNT-1)%FILT_COUNT);
 
     /* Select+Start cycles the 6 standard views (plain Start opens the system
      * menu instead; save/load/new live there now). */
-    if (sel_held && PRESS(PAD_START)) g_ui.want_view = (int8_t)(((g_ui.want_view) % 6) + 1);
+    /* Advance the PERSISTENT view index (want_view is a one-shot apply signal
+     * cleared every poll above, so cycling has to track its own state). */
+    if (sel_held && PRESS(PAD_START)) {
+        g_ui.cur_view  = (int8_t)((g_ui.cur_view + 1) % 6);
+        g_ui.want_view = (int8_t)(g_ui.cur_view + 1);
+    }
 
-    /* zoom: L2 out / R2 in ; pan when combined with L1/R1.
-     *   R1+R2 -> pan right + up ; L1+L2 -> pan left + down.
-     * Splitting the two diagonals across the two shoulder combos lets a digital
-     * pad reach all four screen directions; an analog pad still pans via these
-     * combos. Pan goes through cam_pan_screen (screen-aligned, zoom-scaled).
-     * Plain L2/R2 (no shoulder modifier) feed the damped zoom integrator. */
-    if (DOWN(PAD_R2)) {
-        if (DOWN(PAD_R1)) { g_ui.d_pan_x += 4; g_ui.d_pan_y -= 4; g_ui.moving=1; }
-        else              { g_ui.d_zoom += 6; g_ui.moving=1; }
-    }
-    if (DOWN(PAD_L2)) {
-        if (DOWN(PAD_L1)) { g_ui.d_pan_x -= 4; g_ui.d_pan_y += 4; g_ui.moving=1; }
-        else              { g_ui.d_zoom -= 6; g_ui.moving=1; }
-    }
+    /* zoom: R2 in / L2 out, feeding the damped zoom integrator. (Pan now lives
+     * on L1 + right stick; the old shoulder-combo pan is gone.) */
+    if (DOWN(PAD_R2)) { g_ui.d_zoom += 6; g_ui.moving = 1; }
+    if (DOWN(PAD_L2)) { g_ui.d_zoom -= 6; g_ui.moving = 1; }
 
     /* --- Interactive modeling verbs -------------------------------------- *
      * The face-press flow (see modeling.c). With NO edit pending, Cross/Circle
@@ -192,20 +210,19 @@ void input_poll(UiState **out) {
     if (sel_held && PRESS(PAD_TRIANGLE)) g_ui.want_undo = 1;
     if (sel_held && PRESS(PAD_CIRCLE))   g_ui.want_redo = 1;
 
-    /* d-pad: ORBIT when idle, value/distance edit when a feature edit is pending.
-     * The idle orbit is the digital-pad fallback so the model can be inspected
-     * without an analog stick (the right stick still orbits when the pad is in
-     * analog mode). Held d-pad feeds the same damped integrator as the stick. */
+    /* d-pad: navigate the FeatureManager tree when idle (Up/Down move the tree
+     * selection; consumed in input_apply, which has the Document). While a
+     * feature edit is PENDING the d-pad instead edits the value/distance
+     * (Up/Down nudge, Left/Right scale the step). Orbit is the right stick now. */
     if (pending) {
         if (PRESS(PAD_UP))    { g_ui.active_value += g_ui.value_step; g_ui.want_dist_delta += g_ui.value_step; }
         if (PRESS(PAD_DOWN))  { g_ui.active_value -= g_ui.value_step; g_ui.want_dist_delta -= g_ui.value_step; }
         if (PRESS(PAD_RIGHT)) g_ui.value_step  *= 10;
         if (PRESS(PAD_LEFT))  g_ui.value_step   = (g_ui.value_step > 1) ? g_ui.value_step/10 : 1;
     } else {
-        if (DOWN(PAD_UP))    { g_ui.d_pitch += 6; g_ui.moving = 1; }
-        if (DOWN(PAD_DOWN))  { g_ui.d_pitch -= 6; g_ui.moving = 1; }
-        if (DOWN(PAD_LEFT))  { g_ui.d_yaw   -= 6; g_ui.moving = 1; }
-        if (DOWN(PAD_RIGHT)) { g_ui.d_yaw   += 6; g_ui.moving = 1; }
+        if (PRESS(PAD_UP))   g_ui.want_tree_prev = 1;
+        if (PRESS(PAD_DOWN)) g_ui.want_tree_next = 1;
+        /* Left/Right reserved for future tree collapse/expand. */
     }
 
     /* L3 zoom-to-fit ; R3 recenter pivot */
@@ -234,7 +251,7 @@ void input_poll(UiState **out) {
  * velocity (ORBIT_GAIN for yaw/pitch, ZOOM_GAIN for zoom). */
 #define VEL_SHIFT   6        /* fixed-point headroom for velocities          */
 #define EASE_SHIFT  2        /* approach 1/(2^EASE_SHIFT) of the gap / frame  */
-#define ORBIT_GAIN  12       /* stick impulse -> target orbit velocity        */
+#define ORBIT_GAIN  3        /* stick impulse -> target orbit velocity (4x slower than the original 12) */
 #define ZOOM_GAIN   8        /* impulse -> target zoom velocity               */
 
 /* Largest orbit pitch: straight up/down (SIN_LEN/4 == 90 deg). Orbit can reach
@@ -284,6 +301,20 @@ void input_apply(UiState *ui, Camera *cam, Document *doc, History *hist) {
     if (ui->want_zoom_fit) cam_zoom_to_fit(cam, 600);   /* demo half-extent */
     if (ui->want_view)     cam_set_view(cam, (StdView)(ui->want_view - 1));
     if (ui->want_recenter) cam_recenter(cam);
+
+    /* Feature-tree navigation (d-pad Up/Down): step the FM selection through the
+     * document's feature list by index. selected_feat==0 (none) enters at the
+     * first row going down / the last row going up. */
+    if ((ui->want_tree_prev || ui->want_tree_next) && doc->feat_count > 0) {
+        int idx = -1;
+        for (int i = 0; i < doc->feat_count; ++i)
+            if (doc->feat[i].id == ui->selected_feat) { idx = i; break; }
+        if (ui->want_tree_next) idx = (idx < 0) ? 0 : idx + 1;
+        else                    idx = (idx < 0) ? (doc->feat_count - 1) : idx - 1;
+        if (idx < 0) idx = 0;
+        if (idx >= doc->feat_count) idx = doc->feat_count - 1;
+        ui->selected_feat = doc->feat[idx].id;
+    }
 
     /* Undo/redo through the centralised history. When an edit lands, main.c
      * (via model_confirm) does the hist_commit; after an undo/redo the doc is
