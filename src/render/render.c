@@ -26,18 +26,17 @@
 
 #define OT_LEN     1024
 #define SCRATCH    (24*1024)
-/* Render width comes from camera.h (the one knob). 368x240 = a gentle hi-res:
- * NTSC shows it in the same physical width as 320, so the 8px font is ~13%
- * smaller and pixels are ~0.87:1 (barely condensed); camera.c corrects the
- * model's Y aspect. Two 368x240 buffers stack at y=0/240 in VRAM (1024x512),
- * font at x=960 — plenty of room. */
+/* Render width comes from camera.h (the one knob). 512x240 hi-res: the 8px font
+ * reads ~62% of 320, pixels ~0.625:1 (moderately condensed); camera.c corrects
+ * the model's Y aspect. Two 512x240 buffers stack at y=0/240 in VRAM (1024x512)
+ * = ~47% used; font at x=960 sits clear of the 512-wide buffers. */
 #define SCREEN_W   MINICAD_SCREEN_W
 #define SCREEN_H   240
 /* FeatureManager dock width (px). The 3D viewport ("blue field") is the area to
  * its right, [FM_PANEL_W, SCREEN_W); VIEW_CX is that region's center so the model
  * sits in the middle of the *visible* canvas, not the middle of the whole frame.
- * 136px @ 368: a touch wider than the original 120px @ 320 panel (17 glyph cols). */
-#define FM_PANEL_W 136
+ * 192px @ 512 ~= 37.5% (same physical proportion as the 136px @ 368 panel; 24 cols). */
+#define FM_PANEL_W 192
 #define VIEW_CX    ((FM_PANEL_W + SCREEN_W) / 2)
 
 /* The 1KB scratchpad lives at 0x1F800000 (KSEG). Use it for the hottest
