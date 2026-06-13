@@ -14,7 +14,8 @@
 #define MCAD_MAGIC1 'C'
 #define MCAD_MAGIC2 'A'
 #define MCAD_MAGIC3 'D'
-#define MCAD_VERSION 2   /* v2: FEAT_SKETCH stores a parametric Sketch2 */
+#define MCAD_VERSION 3   /* v3: each feature carries its (length-prefixed) name.
+                          * v2: FEAT_SKETCH stores a parametric Sketch2 */
 
 /* Encode a Document into `buf` (capacity `cap`). Returns bytes written, or
  * 0 on overflow. Header: magic[4], u8 version, u8 feature_count,

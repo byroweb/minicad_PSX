@@ -47,6 +47,17 @@ void cam_update(Camera *c) {
     c->m.m[2][0]=Z(r20); c->m.m[2][1]=Z(r21); c->m.m[2][2]=Z(r22);
     #undef Z
 
+    /* Aspect correction for hi-res widths (see camera.h): at W>320 with 240
+     * lines the pixels are taller than wide, so GeomScreen=W projects the model
+     * too tall. Scale the Y output row by 320/W to restore a 1:1 on-screen
+     * aspect. This is a no-op at 320 (factor == FX_ONE) and only ever shrinks Y,
+     * so it stays within the int16 matrix range. */
+#if MINICAD_YASPECT_FX != FX_ONE
+    c->m.m[1][0] = (short)fx_mul(c->m.m[1][0], MINICAD_YASPECT_FX);
+    c->m.m[1][1] = (short)fx_mul(c->m.m[1][1], MINICAD_YASPECT_FX);
+    c->m.m[1][2] = (short)fx_mul(c->m.m[1][2], MINICAD_YASPECT_FX);
+#endif
+
     /* translation: push the model away from the eye along +Z so perspective
      * has positive SZ. Pivot offset is applied here so orbit centers on it. */
     c->trans.vx = -c->pivot.x;
@@ -66,6 +77,10 @@ void cam_set_view(Camera *c, StdView v) {
     case VIEW_TOP:    c->yaw = 0;            c->pitch = SIN_LEN/4;    break;
     case VIEW_BOTTOM: c->yaw = 0;            c->pitch = -SIN_LEN/4;   break;
     }
+    /* Snapping to a standard view also resets zoom to the default frame, so a
+     * user who got "lost" in the zoom dimension is brought back to a sane view
+     * (matches cam_init's c->zoom). */
+    c->zoom = FX_ONE/5;
 }
 
 void cam_zoom_to_fit(Camera *c, mym_t half_extent) {

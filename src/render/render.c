@@ -26,8 +26,18 @@
 
 #define OT_LEN     1024
 #define SCRATCH    (24*1024)
-#define SCREEN_W   320
+/* Render width comes from camera.h (the one knob). 512x240 hi-res: the 8px font
+ * reads ~62% of 320, pixels ~0.625:1 (moderately condensed); camera.c corrects
+ * the model's Y aspect. Two 512x240 buffers stack at y=0/240 in VRAM (1024x512)
+ * = ~47% used; font at x=960 sits clear of the 512-wide buffers. */
+#define SCREEN_W   MINICAD_SCREEN_W
 #define SCREEN_H   240
+/* FeatureManager dock width (px). The 3D viewport ("blue field") is the area to
+ * its right, [FM_PANEL_W, SCREEN_W); VIEW_CX is that region's center so the model
+ * sits in the middle of the *visible* canvas, not the middle of the whole frame.
+ * 192px @ 512 ~= 37.5% (same physical proportion as the 136px @ 368 panel; 24 cols). */
+#define FM_PANEL_W 192
+#define VIEW_CX    ((FM_PANEL_W + SCREEN_W) / 2)
 
 /* The 1KB scratchpad lives at 0x1F800000 (KSEG). Use it for the hottest
  * per-face working set: the 4 transformed screen verts + a small staging slot.
@@ -56,7 +66,7 @@ void render_init(void) {
     g_rc.draw[0].isbg = 1; g_rc.draw[1].isbg = 1;
     g_rc.active = 0;
     InitGeom();
-    gte_SetGeomOffset(SCREEN_W/2, SCREEN_H/2);
+    gte_SetGeomOffset(VIEW_CX, SCREEN_H/2);   /* center model in the blue canvas, not the whole frame */
     gte_SetGeomScreen(SCREEN_W);            /* projection plane distance */
     FntLoad(960, 0);
     FntOpen(8, 8, 304, 60, 0, 256);
@@ -64,8 +74,9 @@ void render_init(void) {
 
 void render_set_camera(const Camera *c) {
     gte_SetRotMatrix(&c->m);
-    gte_SetTransMatrix(&c->m);              /* trans vector set below */
-    /* load translation into GTE TRX/TRY/TRZ */
+    /* load translation into GTE TRX/TRY/TRZ. (camera.c maintains c->trans but
+     * never c->m.t, so we set the translation registers straight from the
+     * VECTOR; a gte_SetTransMatrix(&c->m) here would only load stale t[].) */
     gte_SetTransVector((VECTOR *)&c->trans);
 }
 
@@ -556,14 +567,14 @@ void render_model(Brep *b, UiState *ui, int moving) {
  *   bucket 0: cursor (already drawn there by draw_cursor) stays on top.
  */
 #define FM_X        0
-#define FM_W        120
-#define FM_DIV_X    119
+#define FM_W        FM_PANEL_W
+#define FM_DIV_X    (FM_W - 1)
 #define FM_TITLE_H  10
 #define FM_ROW_Y0   22         /* first tree row sits below the top diag bar  */
 #define FM_PITCH    10
 #define FM_INDENT   6
 #define FM_TXT_X0   2
-#define FM_COLS     15            /* 120px / 8px glyph                       */
+#define FM_COLS     (FM_W / 8)    /* chars that fit (8px glyph)              */
 /* The whole panel lives in ONE OT bucket that is GUARANTEED to sort in front
  * of the 3D model. The model's quads/edges land in low buckets (otz>>2, plus a
  * per-feature ±1 nudge, with edges one bucket nearer), so buckets 0/1 can be
@@ -628,7 +639,7 @@ static char *u2s(char *p, int v) {           /* 0..999 -> ascii; returns end */
     *p++ = (char)('0' + v % 10);
     return p;
 }
-static void render_bars(void) {
+static void render_bars(Document *doc, UiState *ui) {
     int a = g_rc.active;
     uint32_t *ot = g_rc.ot[a];
     long used = (long)(g_rc.nextpri - g_rc.pribuf[a]);
@@ -645,7 +656,23 @@ static void render_bars(void) {
     *p = 0;
     void *pri = g_rc.nextpri;
     pri = FntSort(&ot[FM_BKT], pri, 4, 9, buf);
-    pri = FntSort(&ot[FM_BKT], pri, 4, SCREEN_H - 16, "STATUS: READY");
+
+    /* bottom status: active selection filter + the selected feature's name */
+    static const char *const filt_name[FILT_COUNT] = {
+        "VERT", "EDGE", "FACE", "PROF", "DATUM", "LOOP"
+    };
+    char sbuf[48]; char *q = sbuf;
+    const char *fn = (ui->filter < FILT_COUNT) ? filt_name[ui->filter] : "?";
+    while (*fn) *q++ = *fn++;
+    *q++ = ' '; *q++ = ' ';
+    *q++ = 'S'; *q++ = 'E'; *q++ = 'L'; *q++ = ':'; *q++ = ' ';
+    Feature *sf = ui->selected_feat ? doc_find(doc, ui->selected_feat) : 0;
+    if (sf && sf->name[0]) {
+        const char *nm = sf->name;
+        while (*nm && q < sbuf + 46) *q++ = *nm++;
+    } else { *q++ = '-'; *q++ = '-'; }
+    *q = 0;
+    pri = FntSort(&ot[FM_BKT], pri, 4, SCREEN_H - 16, sbuf);
 
     /* gauge colour by load: green < 50, yellow < 80, red otherwise */
     int r, g, b;
@@ -671,7 +698,7 @@ void render_panel(Document *doc, UiState *ui) {
     int a = g_rc.active;
     uint32_t *ot = g_rc.ot[a];
 
-    render_bars();   /* top/bottom diagnostic bars, on top (added first) */
+    render_bars(doc, ui);   /* top/bottom diagnostic bars, on top (added first) */
 
     /* per-feature depth (single forward pass; parents precede children) */
     int depth[DOC_MAX_FEATURES];

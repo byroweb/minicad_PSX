@@ -12,6 +12,14 @@
 #ifndef MINICAD_CAMERA_H
 #define MINICAD_CAMERA_H
 
+/* Display width (must match SCREEN_W in render.c/input.c — this is the one knob).
+ * 320x240 is square on a 4:3 NTSC screen; any wider mode at 240 lines has
+ * narrower (taller) pixels, so camera.c scales the projected Y by 320/W to keep
+ * geometry at a 1:1 on-screen aspect. 512: text ~62% of 320, pixels ~0.625:1
+ * (moderately condensed); double-buffered footprint 512x480 = ~47% of VRAM. */
+#define MINICAD_SCREEN_W   512
+#define MINICAD_YASPECT_FX ((320 << 12) / MINICAD_SCREEN_W)   /* 1.12; ==FX_ONE at 320 */
+
 #include <psxgte.h>
 #include "minicad/fixed.h"
 #include "minicad/ivec.h"
